@@ -52,7 +52,7 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 │  │  2. POST /api/check-updates              │                           │
 │  │  3. Motta oppdateringsliste              │                           │
 │  │  4. Les utsettelsesteller                │                           │
-│  │  5. Vis swiftDialog til bruker           │  ← launchctl asuser       │
+│  │  5. Vis osascript-dialog til bruker       │  ← launchctl asuser       │
 │  │     (via launchctl asuser)               │                           │
 │  │  6a. "Oppdater" → installer direkte      │  ← Har root-tilgang!     │
 │  │  6b. "Utsett"  → oppdater teller         │                           │
@@ -69,10 +69,10 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 │  └──────────────────────────────────────────┘                           │
 │                                                                         │
 │  ┌──────────────────────────────────────────┐                           │
-│  │  swiftDialog (UI, kjørt i brukerkontekst)│                           │
+│  │  osascript (innebygd macOS dialog)       │                           │
+│  │  - AppleScript display dialog/alert      │                           │
 │  │  - Liste over tilgjengelige oppdateringer│                           │
-│  │  - App-ikoner + versjonsnummer           │                           │
-│  │  - "Oppdater nå" / "Utsett (X igjen)"   │                           │
+│  │  - "Oppdater i kveld" / "Utsett (X)"    │                           │
 │  └──────────────────────────────────────────┘                           │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -85,11 +85,12 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 | **Innebygd scheduling** | Intune styrer intervallet (f.eks. hver 8. time) |
 | **Enkel distribusjon** | Én fil lastes opp i Intune → ingen pakkering nødvendig |
 | **Enkel oppdatering** | Oppdater scriptet i Intune-portalen → rulles ut automatisk |
-| **Ingen ekstra komponenter** | Ingen LaunchAgent, ingen Python-runtime å distribuere |
+| **Ingen ekstra komponenter** | Ingen LaunchAgent, ingen Python-runtime, ingen ekstra UI-verktøy å distribuere. `osascript` er innebygd. |
 | **Compliance-rapportering** | Intune logger script-kjøringer automatisk |
 
-> **Viktig**: Selv om scriptet kjører som root, vises swiftDialog i brukerens kontekst
-> via `launchctl asuser`. Brukeren ser en vanlig macOS-dialog.
+> **Viktig**: Selv om scriptet kjører som root, vises `osascript`-dialoger i brukerens
+> kontekst via `launchctl asuser`. Brukeren ser en vanlig macOS-dialog. Ingen ekstra
+> avhengigheter – `osascript` er innebygd i macOS.
 
 ---
 
@@ -116,9 +117,9 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
   - Klient → Function: API-nøkkel (Function Key)
   - Function → Graph API: Managed Identity + App Registration
 
-### 1.2 Tabellstruktur
+### 1.2 Storage-arkitektur
 
-**Tabell: `ManagedApps`**
+**Azure Table Storage – `ManagedApps`**
 
 | Felt | Type | Beskrivelse |
 |------|------|-------------|
@@ -127,23 +128,40 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 | `app_name` | string | Visningsnavn |
 | `latest_version` | string | Siste tilgjengelige versjon |
 | `intune_app_id` | string | App-ID i Intune |
+| `blob_path` | string | Sti til pakken i Blob Storage (f.eks. `packages/firefox/Firefox-115.0.1.pkg`) |
 | `min_os_version` | string | Minimum macOS-versjon |
 | `updated_at` | datetime | Sist oppdatert |
 | `updated_by` | string | Hvem/hva som oppdaterte (AutoPkg resept-ID) |
 
-**Tabell: `UpdateEvents`** (logging/audit)
+**Azure Table Storage – `UpdateEvents`** (logging/audit)
 
 | Felt | Type | Beskrivelse |
 |------|------|-------------|
 | `PartitionKey` | string | Enhetens serienummer (hashet) |
 | `RowKey` | string | Timestamp + bundle ID |
-| `action` | string | `"updated"`, `"deferred"`, `"forced"` |
+| `action` | string | `"updated"`, `"deferred"`, `"forced"`, `"scheduled"` |
 | `from_version` | string | Gammel versjon |
 | `to_version` | string | Ny versjon |
+
+**Azure Blob Storage – `packages` container**
+
+AutoPkg laster opp ferdige .pkg/.dmg-filer hit. Klienten får **aldri** direkte tilgang – den får en kortlivet SAS-token fra Azure Function.
+
+```
+packages/
+├── org.mozilla.firefox/
+│   └── Firefox-115.0.1.pkg
+├── com.google.Chrome/
+│   └── GoogleChrome-121.0.pkg
+└── com.microsoft.teams/
+    └── Teams-24.2.pkg
+```
 
 ### 1.3 API-endepunkter
 
 #### `POST /api/check-updates`
+
+Klienten sender sine installerte apper. API-et returnerer oppdateringer med **kortlivede SAS-tokens** for direkte nedlasting fra Azure Blob Storage.
 
 **Request:**
 ```json
@@ -166,7 +184,9 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
       "app_name": "Firefox",
       "installed_version": "114.0.2",
       "latest_version": "115.0.1",
-      "intune_app_id": "abc123"
+      "download_url": "https://storageaccount.blob.core.windows.net/packages/org.mozilla.firefox/Firefox-115.0.1.pkg?sv=2023-11-03&st=2026-02-26T10%3A00%3A00Z&se=2026-02-26T10%3A15%3A00Z&sr=b&sp=r&sig=xxxxx",
+      "download_filename": "Firefox-115.0.1.pkg",
+      "sas_expires_at": "2026-02-26T10:15:00Z"
     }
   ],
   "up_to_date": [
@@ -178,7 +198,34 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 }
 ```
 
+**SAS-token logikk i Azure Function:**
+
+```python
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
+from datetime import datetime, timedelta, timezone
+
+def generate_download_sas(blob_path: str) -> str:
+    """Generer en kortlivet SAS-token (15 min) for nedlasting av pakke."""
+    sas_token = generate_blob_sas(
+        account_name=STORAGE_ACCOUNT_NAME,
+        container_name="packages",
+        blob_name=blob_path,
+        account_key=STORAGE_ACCOUNT_KEY,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    return f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net/packages/{blob_path}?{sas_token}"
+```
+
+**Sikkerhet:**
+- SAS-token utløper etter **15 minutter** (kun nok tid til nedlasting)
+- Kun **lesertilgang** (read-only)
+- Klienten får aldri storage account key
+- Hvert API-kall genererer nye tokens (ikke gjenbrukbare)
+
 #### `POST /api/register-version`
+
+Kalles av AutoPkg etter vellykket pakking. Laster opp pakken til Blob Storage og registrerer versjonen.
 
 **Request (fra AutoPkg):**
 ```json
@@ -187,27 +234,19 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
   "app_name": "Firefox",
   "latest_version": "115.0.1",
   "intune_app_id": "abc123",
-  "recipe_id": "com.github.autopkg.intune.Firefox"
-}
-```
-
-#### `POST /api/trigger-update`
-
-**Request:**
-```json
-{
-  "device_id": "hashed-serial",
-  "bundle_ids": ["org.mozilla.firefox"],
-  "action": "update"
+  "recipe_id": "com.github.autopkg.intune.Firefox",
+  "blob_path": "org.mozilla.firefox/Firefox-115.0.1.pkg"
 }
 ```
 
 **Logikk:**
-1. Endre app-assignment til "Required" for denne enheten (via Graph API)
-2. Trigger MDM-sync for enheten
-3. Etter 24t: tilbakestill til "Available"
+1. Oppdater `ManagedApps`-tabell med ny versjon og blob_path
+2. Returner bekreftelse
 
-#### `POST /api/request-app` (Fase 7, fremtidig)
+> **Merk**: Selve .pkg/.dmg-filen lastes opp til Blob Storage av AutoPkg-postprocessoren
+> (eller manuelt). `register-version` registrerer bare metadata.
+
+#### `POST /api/request-app` (Fase 5, fremtidig)
 
 **Request:**
 ```json
@@ -225,20 +264,21 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 azure-function/
 ├── host.json
 ├── local.settings.json
-├── requirements.txt
+├── requirements.txt          # azure-functions, azure-data-tables, azure-storage-blob
 ├── check_updates/
-│   ├── __init__.py          # Hovedlogikk
-│   └── function.json        # HTTP trigger config
+│   ├── __init__.py           # Hovedlogikk + SAS-token-generering
+│   └── function.json         # HTTP trigger config
 ├── register_version/
 │   ├── __init__.py
 │   └── function.json
-├── trigger_update/
-│   ├── __init__.py
+├── log_event/
+│   ├── __init__.py           # Logging av update/deferral events
 │   └── function.json
 └── shared/
     ├── __init__.py
-    ├── table_storage.py     # Azure Table Storage helper
-    └── graph_client.py      # Microsoft Graph API helper
+    ├── table_storage.py      # Azure Table Storage helper
+    ├── blob_storage.py       # Azure Blob Storage + SAS-token helper
+    └── graph_client.py       # Microsoft Graph API helper (fremtidig)
 ```
 
 ---
@@ -300,11 +340,23 @@ autopkg run Firefox.intune \
 
 ## Fase 3: Intune Platform Script (update_agent.sh)
 
-> **Endring fra opprinnelig plan**: I stedet for en Python LaunchAgent bruker vi et
-> Intune Platform Script (bash). Dette gir root-tilgang, innebygd scheduling,
-> enklere distribusjon, og eliminerer behovet for separat Python-runtime på klientene.
+> I stedet for en Python LaunchAgent bruker vi et Intune Platform Script (bash).
+> Dette gir root-tilgang, innebygd scheduling, og eliminerer behovet for separat
+> Python-runtime på klientene.
 
-### 3.1 Filstruktur
+### 3.1 Installasjonstidspunkt-strategi
+
+| Scenario | Når installeres oppdateringen? |
+|----------|-------------------------------|
+| Bruker velger "Oppdater" i dialog | **Utenfor arbeidstid** – scriptet registrerer valget og en LaunchDaemon-jobb kjører installasjonen kl 19:00-06:00 |
+| Bruker velger "Utsett" (< 3 ganger) | Neste kjøring av scriptet spør igjen |
+| Bruker har utsatt **3+ ganger** | **Umiddelbart** – tvungen installasjon uavhengig av tidspunkt |
+| Timer utløper (ingen brukerrespons) | Teller som utsettelse |
+| Ingen bruker innlogget | Stille installasjon uten dialog |
+
+**Arbeidstid defineres i config** (default: 08:00-17:00 man-fre).
+
+### 3.2 Filstruktur
 
 Scriptet er **én enkelt bash-fil** som lastes opp direkte i Intune:
 
@@ -318,8 +370,9 @@ Støttefiler opprettes automatisk av scriptet ved første kjøring:
 ```
 /Library/Application Support/UpdateAgent/
 ├── deferrals.json            # Utsettelsesteller per app
-├── config.json               # Konfigurasjon (API URL, nøkkel, etc.)
-├── cache/                    # Nedlastede .pkg/.dmg-filer
+├── pending_updates.json      # Oppdateringer godkjent av bruker, venter på off-hours
+├── config.json               # Konfigurasjon (API URL, nøkkel, arbeidstid, etc.)
+├── cache/                    # Nedlastede .pkg/.dmg-filer (med SAS-token nedlasting)
 └── logs/                     # Lokale logger
 ```
 
@@ -341,7 +394,8 @@ MAX_DEFERRALS=3
 AGENT_DIR="/Library/Application Support/UpdateAgent"
 DEFERRALS_FILE="${AGENT_DIR}/deferrals.json"
 LOG_FILE="${AGENT_DIR}/logs/update_agent.log"
-DIALOG_BIN="/usr/local/bin/dialog"          # swiftDialog
+WORK_HOURS_START=8                          # Arbeidstid start (kl 08:00)
+WORK_HOURS_END=17                           # Arbeidstid slutt (kl 17:00)
 
 # ============================================================
 # HJELPEFUNKSJONER
@@ -510,75 +564,82 @@ if os.path.exists(path):
 }
 
 # ============================================================
-# 4. SWIFTDIALOG – BRUKERINTERAKSJON
+# 4. OSASCRIPT-DIALOGER (innebygd i macOS)
 # ============================================================
 
 show_update_dialog() {
     local updates_json="$1"
     local remaining_deferrals="$2"
 
-    # Bygg --listitem argumenter fra JSON
-    local dialog_args=()
-    dialog_args+=(--title "Programvareoppdateringer tilgjengelig")
-    dialog_args+=(--titlefont "size=20")
-    dialog_args+=(--message "Følgende apper har nye versjoner.\nVelg hva du vil gjøre:")
-    dialog_args+=(--icon "SF=arrow.down.circle.fill,colour=blue")
-    dialog_args+=(--button1text "Oppdater nå")
-    dialog_args+=(--button2text "Utsett (${remaining_deferrals} igjen)")
-    dialog_args+=(--height 450)
-    dialog_args+=(--width 650)
-    dialog_args+=(--timer 300)
-    dialog_args+=(--json)
-
-    # Parse JSON og legg til listitems
-    while IFS= read -r line; do
-        dialog_args+=(--listitem "$line")
-    done < <(echo "$updates_json" | python3 -c "
+    # Bygg appliste-tekst fra JSON
+    local app_list
+    app_list=$(echo "$updates_json" | python3 -c "
 import json, sys
 updates = json.load(sys.stdin)
+lines = []
 for u in updates:
     name = u.get('app_name', u['bundle_id'])
     old_v = u.get('installed_version', '?')
     new_v = u.get('latest_version', '?')
-    icon_path = ''
-    # Prøv å finne app-ikon
-    import glob
-    matches = glob.glob(f'/Applications/{name}.app/Contents/Resources/*.icns')
-    if matches:
-        icon_path = matches[0]
-    line = f\"{name}|{old_v} → {new_v}\"
-    if icon_path:
-        line += f'|icon={icon_path}'
-    line += '|statustext=Klar'
-    print(line)
+    lines.append(f'• {name}  ({old_v} → {new_v})')
+print('\n'.join(lines))
 ")
 
-    # Kjør dialog i brukerens kontekst
-    run_as_user "$DIALOG_BIN" "${dialog_args[@]}"
-    return $?  # 0 = button1 (oppdater), 2 = button2 (utsett), 4 = timer utløpt
+    local defer_text="Utsett (${remaining_deferrals} igjen)"
+
+    # Kjør osascript i brukerens kontekst
+    local result
+    result=$(run_as_user osascript -e "
+        display dialog \"Følgende oppdateringer er tilgjengelige:\n\n${app_list}\n\nOppdateringene installeres utenfor arbeidstid.\" ¬
+            with title \"Programvareoppdateringer\" ¬
+            buttons {\"${defer_text}\", \"Oppdater i kveld\"} ¬
+            default button \"Oppdater i kveld\" ¬
+            giving up after 300
+    " 2>&1) || true
+
+    if echo "$result" | grep -q "Oppdater i kveld"; then
+        return 0   # Bruker valgte oppdater
+    elif echo "$result" | grep -q "gave up:true"; then
+        return 4   # Timer utløpt
+    else
+        return 2   # Bruker valgte utsett
+    fi
 }
 
 show_forced_dialog() {
-    run_as_user "$DIALOG_BIN" \
-        --title "Obligatorisk oppdatering" \
-        --message "Du har utsatt disse oppdateringene maksimalt antall ganger.\n\nOppdateringene installeres nå." \
-        --icon "SF=exclamationmark.triangle.fill,colour=orange" \
-        --button1text "OK" \
-        --button2disabled \
-        --timer 60 \
-        --height 300 \
-        --width 500
+    run_as_user osascript -e "
+        display alert \"Obligatorisk oppdatering\" ¬
+            message \"Du har utsatt disse oppdateringene maksimalt antall ganger.\n\nOppdateringene installeres nå.\" ¬
+            as critical ¬
+            buttons {\"OK\"} ¬
+            default button \"OK\" ¬
+            giving up after 60
+    " 2>/dev/null || true
 }
 
-show_progress_dialog() {
-    run_as_user "$DIALOG_BIN" \
-        --title "Installerer oppdateringer..." \
-        --message "Oppdateringene installeres. Du kan fortsette å jobbe." \
-        --icon "SF=arrow.down.circle.fill,colour=green" \
-        --button1text "OK" \
-        --timer 10 \
-        --height 250 \
-        --width 450
+show_progress_notification() {
+    run_as_user osascript -e "
+        display notification \"Oppdateringene lastes ned og installeres. Du kan fortsette å jobbe.\" ¬
+            with title \"Installerer oppdateringer\"
+    " 2>/dev/null || true
+}
+
+is_within_work_hours() {
+    local hour
+    hour=$(date +%H)
+    local dow
+    dow=$(date +%u)  # 1=mandag, 7=søndag
+
+    # Helg = utenfor arbeidstid
+    if [[ "$dow" -ge 6 ]]; then
+        return 1
+    fi
+
+    # Sjekk klokkeslett
+    if [[ "$hour" -ge "$WORK_HOURS_START" && "$hour" -lt "$WORK_HOURS_END" ]]; then
+        return 0  # I arbeidstid
+    fi
+    return 1  # Utenfor arbeidstid
 }
 
 # ============================================================
@@ -663,21 +724,42 @@ main() {
     mkdir -p "${AGENT_DIR}/logs" "${AGENT_DIR}/cache"
     log "INFO" "Update Agent startet"
 
-    # Sjekk at swiftDialog er installert
-    if [[ ! -x "$DIALOG_BIN" ]]; then
-        log "ERROR" "swiftDialog ikke funnet på ${DIALOG_BIN}"
-        exit 1
+    # ── STEG 0: Installer ventende oppdateringer hvis utenfor arbeidstid ──
+    if ! is_within_work_hours && [[ -f "${AGENT_DIR}/pending_updates.json" ]]; then
+        log "INFO" "Utenfor arbeidstid – installerer ventende oppdateringer"
+
+        # Sjekk om bruker er innlogget for notifikasjon
+        local current_user
+        current_user=$(get_current_user)
+        if [[ "$current_user" != "root" && "$current_user" != "loginwindow" ]]; then
+            show_installing_dialog
+        fi
+
+        python3 -c "
+import json, sys
+with open('${AGENT_DIR}/pending_updates.json') as f:
+    updates = json.load(f)
+for u in updates:
+    print(u['bundle_id'], u.get('intune_app_id',''), u.get('download_url',''), u.get('installed_version',''), u.get('latest_version',''))
+" | while read -r bid app_id dl_url old_ver new_ver; do
+            install_update "$bid" "$app_id" "$dl_url"
+            report_event "$bid" "updated" "$old_ver" "$new_ver"
+        done
+
+        rm -f "${AGENT_DIR}/pending_updates.json"
+        log "INFO" "Ventende oppdateringer installert"
     fi
 
-    # Sjekk at en bruker er innlogget
+    # ── STEG 1: Sjekk at en bruker er innlogget (for dialog) ──
     local current_user
     current_user=$(get_current_user)
     if [[ "$current_user" == "root" || "$current_user" == "loginwindow" ]]; then
-        log "INFO" "Ingen bruker innlogget, avslutter"
+        log "INFO" "Ingen bruker innlogget – kun stille oppdateringer mulig"
+        # Kunne installert tvungne oppdateringer her uten dialog
         exit 0
     fi
 
-    # 1. Skann installerte apper
+    # ── STEG 2: Skann installerte apper ──
     log "INFO" "Scanner installerte apper..."
     local installed_apps
     installed_apps=$(scan_applications)
@@ -745,13 +827,22 @@ for u in updates:
 print(json.dumps(promptable), json.dumps(forced), min_remaining)
 ")
 
-    # 5. Håndter tvungne oppdateringer (3+ utsettelser)
+    # ── STEG 5: Håndter tvungne oppdateringer (3+ utsettelser → umiddelbart) ──
     local forced_count
     forced_count=$(echo "$forced_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
 
     if [[ "$forced_count" -gt 0 ]]; then
-        log "INFO" "Tvinger oppdatering av ${forced_count} apper"
-        show_forced_dialog
+        log "INFO" "Tvinger UMIDDELBAR oppdatering av ${forced_count} apper (3+ utsettelser)"
+
+        # Bygg lesbar appliste for dialogen
+        local forced_app_list
+        forced_app_list=$(echo "$forced_json" | python3 -c "
+import json, sys
+for u in json.load(sys.stdin):
+    name = u.get('app_name', u['bundle_id'])
+    print(f'• {name}  ({u.get(\"installed_version\",\"?\")} → {u.get(\"latest_version\",\"?\")})')
+")
+        show_forced_dialog "$forced_app_list"
 
         echo "$forced_json" | python3 -c "
 import json, sys
@@ -763,27 +854,49 @@ for u in json.load(sys.stdin):
         done
     fi
 
-    # 6. Vis prompt for vanlige oppdateringer
+    # ── STEG 6: Vis prompt for vanlige oppdateringer ──
     local promptable_count
     promptable_count=$(echo "$promptable_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
 
     if [[ "$promptable_count" -gt 0 ]]; then
-        show_update_dialog "$promptable_json" "$min_remaining"
+        # Bygg lesbar appliste for osascript-dialogen
+        local promptable_app_list
+        promptable_app_list=$(echo "$promptable_json" | python3 -c "
+import json, sys
+for u in json.load(sys.stdin):
+    name = u.get('app_name', u['bundle_id'])
+    print(f'• {name}  ({u.get(\"installed_version\",\"?\")} → {u.get(\"latest_version\",\"?\")})')
+")
+        show_update_dialog "$promptable_app_list" "$min_remaining"
         local dialog_exit=$?
 
         case $dialog_exit in
-            0)  # Bruker valgte "Oppdater nå"
-                log "INFO" "Bruker valgte å oppdatere"
-                show_progress_dialog &
+            0)  # Bruker valgte "Installer i kveld"
+                log "INFO" "Bruker godkjente oppdatering – planlegger for utenfor arbeidstid"
 
-                echo "$promptable_json" | python3 -c "
+                if is_within_work_hours; then
+                    # Lagre til pending_updates.json – installeres utenfor arbeidstid
+                    echo "$promptable_json" > "${AGENT_DIR}/pending_updates.json"
+                    show_scheduled_dialog "Oppdateringene installeres i kveld"
+                    echo "$promptable_json" | python3 -c "
+import json, sys
+for u in json.load(sys.stdin):
+    print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''))
+" | while read -r bid old_ver new_ver; do
+                        report_event "$bid" "scheduled" "$old_ver" "$new_ver"
+                    done
+                else
+                    # Allerede utenfor arbeidstid – installer nå
+                    show_installing_dialog
+                    echo "$promptable_json" | python3 -c "
 import json, sys
 for u in json.load(sys.stdin):
     print(u['bundle_id'], u.get('intune_app_id',''), u.get('download_url',''), u.get('installed_version',''), u.get('latest_version',''))
 " | while read -r bid app_id dl_url old_ver new_ver; do
-                    install_update "$bid" "$app_id" "$dl_url"
-                    report_event "$bid" "updated" "$old_ver" "$new_ver"
-                done
+                        install_update "$bid" "$app_id" "$dl_url"
+                        report_event "$bid" "updated" "$old_ver" "$new_ver"
+                    done
+                fi
                 ;;
             2)  # Bruker valgte "Utsett"
                 log "INFO" "Bruker utsatte oppdateringer"
@@ -830,27 +943,37 @@ I Intune-portalen konfigureres scriptet slik:
 | **Max retries** | 3 |
 | **Assigned groups** | Alle macOS-enheter |
 
-### 3.4 swiftDialog i brukerkontekst
+### 3.4 osascript fra root-kontekst
 
-Nøkkelteknikken for å vise GUI fra et root-script:
+Nøkkelteknikken for å vise dialog til bruker fra et root-script:
 
 ```bash
 # Finn innlogget bruker
 current_user=$(stat -f "%Su" /dev/console)
 uid=$(id -u "$current_user")
 
-# Kjør dialog i brukerens kontekst
-launchctl asuser "$uid" sudo -u "$current_user" /usr/local/bin/dialog \
-    --title "Oppdateringer" \
-    --message "..." \
-    --button1text "Oppdater" \
-    --button2text "Utsett"
+# Vis dialog i brukerens kontekst
+launchctl asuser "$uid" sudo -u "$current_user" osascript -e '
+    display dialog "Oppdateringer tilgjengelig" ¬
+        buttons {"Utsett", "Installer i kveld"} ¬
+        default button "Installer i kveld" ¬
+        with title "Programvareoppdateringer" ¬
+        giving up after 300
+'
 
-# Returkoder:
-# 0 = Button 1 (Oppdater)
-# 2 = Button 2 (Utsett)
-# 4 = Timer utløpt
+# Vis notifikasjon (diskret)
+launchctl asuser "$uid" sudo -u "$current_user" osascript -e '
+    display notification "Installeres i kveld" ¬
+        with title "Oppdateringer planlagt"
+'
 ```
+
+**Fordeler med osascript:**
+- Innebygd i macOS – ingen ekstra avhengigheter
+- `display dialog` for valg med knapper
+- `display alert` for viktige meldinger (tvungen oppdatering)
+- `display notification` for diskrete bekreftelser
+- Fungerer fra root via `launchctl asuser`
 
 ### 3.5 Direkte installasjon (root-privilegium)
 
@@ -885,8 +1008,9 @@ Ingen MDM-roundtrip nødvendig! Mye raskere enn å vente på Intune sync.
 
 **Regler:**
 - Teller nullstilles når en ny versjon dukker opp fra API
-- Etter 3 utsettelser → tvungen oppdatering (ingen "Utsett"-knapp)
+- Etter 3 utsettelser → tvungen oppdatering **umiddelbart** (ingen "Utsett"-knapp, uansett tidspunkt)
 - Timer-utløp (5 min) teller som utsettelse
+- Vanlige oppdateringer (< 3 utsettelser) installeres **utenfor arbeidstid**
 - Lagres i `/Library/Application Support/` (system-nivå, beskyttet mot bruker)
 
 ---
@@ -897,9 +1021,10 @@ Ingen MDM-roundtrip nødvendig! Mye raskere enn å vente på Intune sync.
 
 | Komponent | Type i Intune | Merknad |
 |-----------|--------------|---------|
-| **swiftDialog** | macOS LOB app (pkg) | Må installeres **før** platform scriptet |
-| **update_agent.sh** | Platform Script (shell) | Hovednscriptet |
-| **config.json** | Platform Script (shell) | Separat script som oppretter config |
+| **update_agent.sh** | Platform Script (shell) | Hovedscriptet – ingen andre avhengigheter |
+| **setup_update_agent.sh** | Platform Script (shell) | Engangskjøring – oppretter config |
+
+> **Ingen ekstra apper å distribuere** – `osascript` er innebygd i macOS.
 
 ### 4.2 Konfigurasjonsskript (kjøres én gang)
 
@@ -918,6 +1043,8 @@ cat > "${AGENT_DIR}/config.json" << 'EOF'
     "api_key": "din-api-nøkkel",
     "max_deferrals": 3,
     "dialog_timeout_seconds": 300,
+    "work_hours_start": 8,
+    "work_hours_end": 17,
     "scan_paths": ["/Applications", "/Applications/Utilities"]
 }
 EOF
@@ -930,14 +1057,14 @@ echo "Update Agent konfigurert"
 
 | Steg | Test | Forventet resultat |
 |------|------|-------------------|
-| 1 | Installer swiftDialog | `/usr/local/bin/dialog` finnes |
-| 2 | Kjør setup-script | Config-fil opprettet |
-| 3 | Kjør update_agent.sh manuelt | Skanner apper, kontakter API |
-| 4 | Mock API med oppdateringer | Dialog vises med appliste |
-| 5 | Klikk "Oppdater" | App installeres, teller nullstilt |
-| 6 | Klikk "Utsett" 3 ganger | 4. kjøring viser tvungen dialog |
-| 7 | La timer løpe ut | Teller som utsettelse |
-| 8 | Ny versjon fra API | Teller nullstilles |
+| 1 | Kjør setup-script | Config-fil opprettet under `/Library/Application Support/UpdateAgent/` |
+| 2 | Kjør `update_agent.sh` manuelt | Skanner apper, kontakter API, viser osascript-dialog |
+| 3 | Mock API med oppdateringer | `display dialog` vises med appliste og knapper |
+| 4 | Klikk "Installer i kveld" (i arbeidstid) | Lagres i `pending_updates.json`, notifikasjon vises |
+| 5 | Kjør scriptet igjen utenfor arbeidstid | Ventende oppdateringer installeres automatisk |
+| 6 | Klikk "Utsett" 3 ganger | 4. kjøring viser `display alert` (tvungen, umiddelbar installasjon) |
+| 7 | La timer løpe ut (5 min) | Teller som utsettelse |
+| 8 | Ny versjon fra API | Utsettelsesteller nullstilles |
 
 ---
 
@@ -973,7 +1100,7 @@ POST /api/request-app
 | Valg | Alternativ | Begrunnelse |
 |------|-----------|-------------|
 | **Intune Platform Script (bash)** | Python LaunchAgent / Swift app | Kjører som root (kan installere direkte), innebygd scheduling, én fil å vedlikeholde, ingen runtime-avhengighet å distribuere. |
-| **swiftDialog for UI** | osascript / PyObjC | Native utseende, aktivt vedlikeholdt, enkel å bruke fra kommandolinje. `launchctl asuser` viser GUI fra root-kontekst. |
+| **osascript for UI** | swiftDialog / PyObjC | Innebygd i macOS – null ekstra avhengigheter å distribuere. `display dialog` for knapper, `display alert` for tvungne meldinger, `display notification` for diskrete bekreftelser. Fungerer fra root via `launchctl asuser`. |
 | **Azure Function** | Direkte Graph API | Sentralisert logikk, caching, enklere klientautentisering, utvidbar. |
 | **Azure Table Storage** | CosmosDB / SQL | Billigst, enklest for key-value data. Nok for dette brukstilfellet. |
 | **Direkte installasjon (root)** | MDM sync + assignment | Mye raskere enn Intune roundtrip. Root-tilgang fra platform script gjør dette mulig. Intune sync som fallback. |
@@ -988,8 +1115,8 @@ Etter godkjenning av denne planen:
 
 1. **Fase 1** – Opprette Azure Function App med kjerneendepunktene
 2. **Fase 2** (parallelt) – Lage AutoPkg VersionReporter postprocessor
-3. **Fase 3** – Platform Script med swiftDialog-integrasjon og utsettelseslogikk
-4. **Fase 4** – Intune-oppsett, swiftDialog-distribusjon og end-to-end testing
+3. **Fase 3** – Platform Script med osascript-dialoger, off-hours installasjon og utsettelseslogikk
+4. **Fase 4** – Intune-oppsett og end-to-end testing
 
 ### Åpne spørsmål
 
@@ -999,5 +1126,4 @@ Etter godkjenning av denne planen:
 - [ ] Skal tvungne oppdateringer ha en grace period (f.eks. 30 min nedtelling) eller kjøres umiddelbart?
 - [ ] Ønsker dere logging/rapportering av oppdateringsstatus per enhet til f.eks. Log Analytics?
 - [ ] Skal agenten fungere offline (cached versjonsliste fra siste API-kall)?
-- [ ] Har dere allerede swiftDialog distribuert, eller må det pakkes?
-- [ ] Skal download-URL for direkte installasjon komme fra API (Azure Blob Storage) eller fra Intune?
+- [ ] Skal det være en grace period på tvungne oppdateringer (f.eks. 5 min nedtelling) eller installere rett etter OK-klikk?

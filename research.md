@@ -102,16 +102,36 @@ launchctl asuser "$uid" sudo -u "$current_user" /usr/local/bin/dialog --title "T
 
 Dette er en velkjent teknikk i macOS-administrasjon (brukt av Nudge, DEPNotify, etc.).
 
-### 1.6 Alternativer til swiftDialog
+### 1.6 UI-verktøy for dialoger
 
-| Verktøy | Språk | Fordeler | Ulemper |
-|---------|-------|----------|---------|
-| **swiftDialog** | Swift | Native UI, aktivt vedlikeholdt, feature-rikt | Ekstra binær å distribuere |
-| **osascript/AppleScript** | AppleScript | Innebygd i macOS, ingen avhengigheter | Begrenset UI, kan blokkeres av MDM |
-| **Python + PyObjC** | Python | Fullt tilpassbar | Tung avhengighet, kompleks |
-| **Notification Center** | Swift/Python | Diskret, native | Begrenset interaksjon, kan ignoreres |
+| Verktøy | Fordeler | Ulemper |
+|---------|----------|---------|
+| **osascript/AppleScript** ✅ | Innebygd i macOS, null avhengigheter, `display dialog`/`display alert`/`display notification` | Enklere UI enn dedikerte verktøy |
+| **swiftDialog** | Native SwiftUI, feature-rikt, lister med ikoner | Ekstra binær å distribuere og vedlikeholde |
+| **Python + PyObjC** | Fullt tilpassbar | Tung avhengighet, kompleks |
+| **Notification Center** | Diskret, native | Begrenset interaksjon, kan ignoreres |
 
-**Anbefaling: swiftDialog** – Best balanse mellom UI-kvalitet og vedlikeholdbarhet.
+**Valg: osascript** – Null avhengigheter, innebygd, fungerer fra root via `launchctl asuser`. Tilstrekkelig for oppdateringsdialog med to knapper.
+
+**osascript-eksempler brukt i løsningen:**
+
+```applescript
+-- Dialog med knapper (oppdatering tilgjengelig)
+display dialog "Firefox: 114.0 → 115.0" ¬
+    buttons {"Utsett (2 igjen)", "Installer i kveld"} ¬
+    default button "Installer i kveld" ¬
+    with title "Oppdateringer" ¬
+    giving up after 300
+
+-- Kritisk alert (tvungen oppdatering)
+display alert "Obligatorisk oppdatering" ¬
+    message "Oppdateringene installeres nå." ¬
+    as critical buttons {"OK"}
+
+-- Diskret notifikasjon (bekreftelse)
+display notification "Installeres i kveld" ¬
+    with title "Oppdateringer planlagt"
+```
 
 ### 1.7 Klientagent-tilnærminger
 
@@ -121,7 +141,7 @@ Dette er en velkjent teknikk i macOS-administrasjon (brukt av Nudge, DEPNotify, 
 | **Python LaunchAgent** | Bedre kodestruktur, lettere testing | Krever Python-runtime distribusjon, ingen root, mer kompleks deploy |
 | **Swift-app** | Native, best ytelse | Kompileringskompleksitet, krever Xcode, vanskelig å vedlikeholde for ikke-Swift-team |
 
-**Anbefaling: Intune Platform Script** – Enklest å vedlikeholde, root-tilgang løser installasjonsproblematikk.
+**Valg: Intune Platform Script** – Enklest å vedlikeholde, root-tilgang løser installasjonsproblematikk, osascript er innebygd.
 
 ---
 
