@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "STORAGE_ACCOUNT_NAME": "your-storage-account",
+    "STORAGE_ACCOUNT_KEY": "your-storage-key",
+    "STORAGE_CONNECTION_STRING": "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net",
+    "BLOB_CONTAINER_NAME": "packages",
+    "TABLE_MANAGED_APPS": "ManagedApps",
+    "TABLE_UPDATE_EVENTS": "UpdateEvents",
+    "SAS_TOKEN_EXPIRY_MINUTES": "15"
+  }
+}
