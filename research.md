@@ -82,7 +82,27 @@ dialog \
 - Enkelt å pakke og distribuere via Intune
 - Ingen avhengigheter utover macOS
 
-### 1.5 Alternativer til swiftDialog
+### 1.5 Intune Platform Scripts
+
+Intune støtter **platform scripts** (shell scripts) for macOS:
+
+- Kjører som **root** (full tilgang til system)
+- Konfigurerbart **kjøreintervall** (f.eks. hver 1, 8 eller 24 timer)
+- Krever **ikke** at brukeren har admin-rettigheter
+- Intune håndterer distribusjon og oppdatering av scriptet
+- Logger kjøreresultat tilbake til Intune for compliance
+
+**Viktig**: Selv om scriptet kjører som root (ingen GUI), kan man vise dialoger til innlogget bruker via `launchctl asuser`:
+
+```bash
+current_user=$(stat -f "%Su" /dev/console)
+uid=$(id -u "$current_user")
+launchctl asuser "$uid" sudo -u "$current_user" /usr/local/bin/dialog --title "Test"
+```
+
+Dette er en velkjent teknikk i macOS-administrasjon (brukt av Nudge, DEPNotify, etc.).
+
+### 1.6 Alternativer til swiftDialog
 
 | Verktøy | Språk | Fordeler | Ulemper |
 |---------|-------|----------|---------|
@@ -92,6 +112,16 @@ dialog \
 | **Notification Center** | Swift/Python | Diskret, native | Begrenset interaksjon, kan ignoreres |
 
 **Anbefaling: swiftDialog** – Best balanse mellom UI-kvalitet og vedlikeholdbarhet.
+
+### 1.7 Klientagent-tilnærminger
+
+| Tilnærming | Fordeler | Ulemper |
+|------------|----------|---------|
+| **Intune Platform Script (bash)** ✅ | Root-tilgang, innebygd scheduling, én fil, ingen runtime-avhengighet | Begrenset feilhåndtering i bash |
+| **Python LaunchAgent** | Bedre kodestruktur, lettere testing | Krever Python-runtime distribusjon, ingen root, mer kompleks deploy |
+| **Swift-app** | Native, best ytelse | Kompileringskompleksitet, krever Xcode, vanskelig å vedlikeholde for ikke-Swift-team |
+
+**Anbefaling: Intune Platform Script** – Enklest å vedlikeholde, root-tilgang løser installasjonsproblematikk.
 
 ---
 

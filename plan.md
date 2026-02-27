@@ -29,7 +29,6 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 │  │                                                                 │    │
 │  │  POST /api/register-version  ← AutoPkg melder ny versjon       │    │
 │  │  POST /api/check-updates     ← Klient sender bundle IDs        │    │
-│  │  POST /api/trigger-update    ← Klient ber om oppdatering       │    │
 │  │  POST /api/request-app       ← Klient ber om ny app (fremtidig)│    │
 │  │  GET  /api/managed-apps      ← Liste over tilgjengelige apper  │    │
 │  │                                                                 │    │
@@ -46,30 +45,51 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 │                         macOS KLIENT                                    │
 │                                                                         │
 │  ┌──────────────────────────────────────────┐                           │
-│  │  Update Agent (Python LaunchAgent)       │                           │
+│  │  Intune Platform Script (kjører som root)│                           │
+│  │  update_agent.sh                         │                           │
 │  │                                          │                           │
 │  │  1. Skann /Applications → bundle IDs     │                           │
 │  │  2. POST /api/check-updates              │                           │
 │  │  3. Motta oppdateringsliste              │                           │
-│  │  4. Vis swiftDialog-prompt               │                           │
-│  │  5. Bruker: "Oppdater" / "Utsett"       │                           │
-│  │  6. POST /api/trigger-update             │                           │
-│  │  7. Trigger Company Portal sync          │                           │
+│  │  4. Les utsettelsesteller                │                           │
+│  │  5. Vis swiftDialog til bruker           │  ← launchctl asuser       │
+│  │     (via launchctl asuser)               │                           │
+│  │  6a. "Oppdater" → installer direkte      │  ← Har root-tilgang!     │
+│  │  6b. "Utsett"  → oppdater teller         │                           │
+│  │  7. Etter 3 utsettelser → tving          │                           │
+│  │  8. Logg resultat til API                │                           │
 │  │                                          │                           │
-│  │  ┌────────────────┐  ┌────────────────┐  │                           │
-│  │  │ deferrals.json │  │ config.plist   │  │                           │
-│  │  │ (utsettelser)  │  │ (innstillinger)│  │                           │
-│  │  └────────────────┘  └────────────────┘  │                           │
+│  │  ┌────────────────────────────────────┐  │                           │
+│  │  │ /Library/Application Support/      │  │                           │
+│  │  │   UpdateAgent/                     │  │                           │
+│  │  │   ├── deferrals.json (utsettelser) │  │                           │
+│  │  │   ├── config.json (innstillinger)  │  │                           │
+│  │  │   └── cache/ (nedlastede pakker)   │  │                           │
+│  │  └────────────────────────────────────┘  │                           │
 │  └──────────────────────────────────────────┘                           │
 │                                                                         │
 │  ┌──────────────────────────────────────────┐                           │
-│  │  swiftDialog (UI)                        │                           │
+│  │  swiftDialog (UI, kjørt i brukerkontekst)│                           │
 │  │  - Liste over tilgjengelige oppdateringer│                           │
 │  │  - App-ikoner + versjonsnummer           │                           │
 │  │  - "Oppdater nå" / "Utsett (X igjen)"   │                           │
 │  └──────────────────────────────────────────┘                           │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Hvorfor Intune Platform Script?
+
+| Fordel | Beskrivelse |
+|--------|-------------|
+| **Root-tilgang** | Scriptet kjører som root → kan installere pakker direkte uten MDM roundtrip |
+| **Innebygd scheduling** | Intune styrer intervallet (f.eks. hver 8. time) |
+| **Enkel distribusjon** | Én fil lastes opp i Intune → ingen pakkering nødvendig |
+| **Enkel oppdatering** | Oppdater scriptet i Intune-portalen → rulles ut automatisk |
+| **Ingen ekstra komponenter** | Ingen LaunchAgent, ingen Python-runtime å distribuere |
+| **Compliance-rapportering** | Intune logger script-kjøringer automatisk |
+
+> **Viktig**: Selv om scriptet kjører som root, vises swiftDialog i brukerens kontekst
+> via `launchctl asuser`. Brukeren ser en vanlig macOS-dialog.
 
 ---
 
@@ -79,11 +99,9 @@ Bygge et komplett system for å oppdage, varsle og installere app-oppdateringer 
 |------|-------------|---------|---------------|
 | **1** | Azure Function App (API) | 2-3 dager | Azure-tilgang |
 | **2** | AutoPkg VersionReporter postprocessor | 1 dag | Fase 1 |
-| **3** | macOS klientagent (kjernefunksjonalitet) | 3-4 dager | Fase 1 |
-| **4** | swiftDialog UI-integrasjon | 1-2 dager | Fase 3 |
-| **5** | Utsettelseslogikk + tvungen oppdatering | 1 dag | Fase 3-4 |
-| **6** | Intune-distribusjon og testing | 1-2 dager | Fase 1-5 |
-| **7** | App-request-funksjonalitet (valgfri) | 2-3 dager | Fase 1 |
+| **3** | Platform Script (bash, kjernefunksjonalitet + UI + utsettelser) | 3-4 dager | Fase 1 |
+| **4** | Intune-oppsett og testing | 1-2 dager | Fase 1-3 |
+| **5** | App-request-funksjonalitet (valgfri) | 2-3 dager | Fase 1 |
 
 ---
 
@@ -280,259 +298,652 @@ autopkg run Firefox.intune \
 
 ---
 
-## Fase 3: macOS Klientagent
+## Fase 3: Intune Platform Script (update_agent.sh)
 
-### 3.1 Arkitektur
+> **Endring fra opprinnelig plan**: I stedet for en Python LaunchAgent bruker vi et
+> Intune Platform Script (bash). Dette gir root-tilgang, innebygd scheduling,
+> enklere distribusjon, og eliminerer behovet for separat Python-runtime på klientene.
+
+### 3.1 Filstruktur
+
+Scriptet er **én enkelt bash-fil** som lastes opp direkte i Intune:
 
 ```
-update-agent/
-├── update_agent/
-│   ├── __init__.py
-│   ├── main.py              # Hovedskript (entry point)
-│   ├── scanner.py            # Skann installerte apper
-│   ├── api_client.py         # Kommunikasjon med Azure Function
-│   ├── deferral_manager.py   # Håndtere utsettelser
-│   ├── notifier.py           # swiftDialog-integrasjon
-│   └── config.py             # Konfigurasjon
-├── config/
-│   ├── com.company.updateagent.plist    # LaunchAgent plist
-│   └── config.plist                      # App-konfigurasjon
-├── requirements.txt
-└── build.sh                  # Bygge-/pakkeskript for Intune
+scripts/
+└── update_agent.sh          # Hoved-scriptet (Intune Platform Script)
 ```
 
-### 3.2 Hovedflyt
+Støttefiler opprettes automatisk av scriptet ved første kjøring:
 
-```python
-def main():
-    # 1. Les konfigurasjon
-    config = load_config()
-    
-    # 2. Skann installerte apper
-    installed_apps = scan_applications()
-    # → [{"bundle_id": "org.mozilla.firefox", "version": "114.0.2"}, ...]
-    
-    # 3. Sjekk mot API
-    updates = api_client.check_updates(installed_apps)
-    
-    # 4. Filtrer basert på utsettelser
-    actionable = deferral_manager.filter_updates(updates)
-    
-    # 5. Vis prompt hvis det finnes oppdateringer
-    if actionable["promptable"]:
-        user_choice = notifier.show_update_dialog(actionable)
-        
-        if user_choice == "update":
-            api_client.trigger_update(actionable["selected"])
-            trigger_company_portal_sync()
-        elif user_choice == "defer":
-            deferral_manager.record_deferral(actionable["deferred"])
-    
-    # 6. Tving oppdatering for apper med 3+ utsettelser
-    if actionable["forced"]:
-        api_client.trigger_update(actionable["forced"])
-        notifier.show_forced_update_notice(actionable["forced"])
-        trigger_company_portal_sync()
+```
+/Library/Application Support/UpdateAgent/
+├── deferrals.json            # Utsettelsesteller per app
+├── config.json               # Konfigurasjon (API URL, nøkkel, etc.)
+├── cache/                    # Nedlastede .pkg/.dmg-filer
+└── logs/                     # Lokale logger
 ```
 
-### 3.3 App-skanning
-
-```python
-def scan_applications(paths=None):
-    """Skann installerte apper og returner bundle IDs + versjoner."""
-    if paths is None:
-        paths = ["/Applications", "/Applications/Utilities"]
-    
-    apps = []
-    for base_path in paths:
-        for app_dir in glob.glob(os.path.join(base_path, "*.app")):
-            plist_path = os.path.join(app_dir, "Contents", "Info.plist")
-            if os.path.exists(plist_path):
-                with open(plist_path, "rb") as f:
-                    info = plistlib.load(f)
-                apps.append({
-                    "bundle_id": info.get("CFBundleIdentifier", ""),
-                    "version": info.get("CFBundleShortVersionString", ""),
-                    "name": info.get("CFBundleName", os.path.basename(app_dir)),
-                    "path": app_dir
-                })
-    return apps
-```
-
-### 3.4 LaunchAgent
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" 
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.company.updateagent</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/python3</string>
-        <string>/Library/Application Support/UpdateAgent/main.py</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <array>
-        <!-- Kjør kl 09:00 og 14:00 på hverdager -->
-        <dict>
-            <key>Hour</key><integer>9</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-        <dict>
-            <key>Hour</key><integer>14</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-    </array>
-    <key>StandardOutPath</key>
-    <string>/var/log/updateagent/agent.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/updateagent/agent_error.log</string>
-</dict>
-</plist>
-```
-
----
-
-## Fase 4: swiftDialog UI
-
-### 4.1 Oppdateringsdialog
+### 3.2 Scriptets hovedflyt
 
 ```bash
-/usr/local/bin/dialog \
-  --title "Programvareoppdateringer tilgjengelig" \
-  --titlefont "size=20" \
-  --message "Følgende apper har nye versjoner tilgjengelig.\n\nVelg appene du vil oppdatere:" \
-  --icon "/System/Library/CoreServices/Software Update.app/Contents/Resources/SoftwareUpdate.icns" \
-  --button1text "Oppdater valgte" \
-  --button2text "Utsett (3 gjenværende)" \
-  --infobuttontext "Mer info" \
-  --listitem "Firefox|Installert: 114.0.2 → Ny: 115.0.1|icon=/Applications/Firefox.app/Contents/Resources/firefox.icns|statustext=Oppdatering klar" \
-  --listitem "Google Chrome|Installert: 120.0 → Ny: 121.0|icon=/Applications/Google Chrome.app/Contents/Resources/app.icns|statustext=Oppdatering klar" \
-  --timer 300 \
-  --height 500 \
-  --width 700 \
-  --json
+#!/bin/bash
+# update_agent.sh – Intune Platform Script
+# Kjører som root via Intune med konfigurerbart intervall
+
+set -euo pipefail
+
+# ============================================================
+# KONFIGURASJON
+# ============================================================
+API_BASE_URL="https://yourfunc.azurewebsites.net/api"
+API_KEY="din-api-nøkkel-her"               # Kan også hentes fra Keychain
+MAX_DEFERRALS=3
+AGENT_DIR="/Library/Application Support/UpdateAgent"
+DEFERRALS_FILE="${AGENT_DIR}/deferrals.json"
+LOG_FILE="${AGENT_DIR}/logs/update_agent.log"
+DIALOG_BIN="/usr/local/bin/dialog"          # swiftDialog
+
+# ============================================================
+# HJELPEFUNKSJONER
+# ============================================================
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" >> "$LOG_FILE"
+}
+
+get_current_user() {
+    stat -f "%Su" /dev/console
+}
+
+get_current_user_uid() {
+    id -u "$(get_current_user)"
+}
+
+# Kjør kommando i brukerens kontekst (for GUI-dialoger)
+run_as_user() {
+    local current_user
+    current_user=$(get_current_user)
+    local uid
+    uid=$(get_current_user_uid)
+
+    if [[ "$current_user" == "root" || "$current_user" == "loginwindow" ]]; then
+        log "WARN" "Ingen bruker innlogget, hopper over dialog"
+        return 1
+    fi
+
+    launchctl asuser "$uid" sudo -u "$current_user" "$@"
+}
+
+# ============================================================
+# 1. SKANN INSTALLERTE APPER
+# ============================================================
+
+scan_applications() {
+    # Genererer JSON-array med bundle IDs og versjoner
+    local apps_json="["
+    local first=true
+
+    for app in /Applications/*.app /Applications/Utilities/*.app; do
+        local plist="${app}/Contents/Info.plist"
+        [[ -f "$plist" ]] || continue
+
+        local bundle_id version app_name
+        bundle_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$plist" 2>/dev/null) || continue
+        version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$plist" 2>/dev/null) || version="0"
+        app_name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleName" "$plist" 2>/dev/null) || app_name=$(basename "$app" .app)
+
+        [[ -z "$bundle_id" ]] && continue
+
+        if [[ "$first" == true ]]; then
+            first=false
+        else
+            apps_json+=","
+        fi
+
+        apps_json+="{\"bundle_id\":\"${bundle_id}\",\"version\":\"${version}\",\"name\":\"${app_name}\"}"
+    done
+
+    apps_json+="]"
+    echo "$apps_json"
+}
+
+# ============================================================
+# 2. SJEKK MOT API
+# ============================================================
+
+check_updates() {
+    local installed_apps="$1"
+    local device_serial
+    device_serial=$(ioreg -d2 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformSerialNumber/{print $4}')
+    local device_id
+    device_id=$(echo -n "$device_serial" | shasum -a 256 | awk '{print $1}')
+
+    local payload="{\"device_id\":\"${device_id}\",\"installed_apps\":${installed_apps}}"
+
+    curl -s -X POST "${API_BASE_URL}/check-updates" \
+        -H "Content-Type: application/json" \
+        -H "x-functions-key: ${API_KEY}" \
+        -d "$payload"
+}
+
+# ============================================================
+# 3. UTSETTELSESLOGIKK
+# ============================================================
+
+get_deferral_count() {
+    local bundle_id="$1"
+    local version="$2"
+
+    if [[ ! -f "$DEFERRALS_FILE" ]]; then
+        echo "0"
+        return
+    fi
+
+    # Sjekk om versjonen matcher (reset teller hvis ny versjon)
+    local stored_version count
+    stored_version=$(python3 -c "
+import json, sys
+with open('${DEFERRALS_FILE}') as f:
+    d = json.load(f)
+entry = d.get('${bundle_id}', {})
+print(entry.get('version_available', ''))
+" 2>/dev/null) || stored_version=""
+
+    if [[ "$stored_version" != "$version" ]]; then
+        echo "0"
+        return
+    fi
+
+    count=$(python3 -c "
+import json
+with open('${DEFERRALS_FILE}') as f:
+    d = json.load(f)
+print(d.get('${bundle_id}', {}).get('count', 0))
+" 2>/dev/null) || count="0"
+
+    echo "$count"
+}
+
+increment_deferral() {
+    local bundle_id="$1"
+    local version="$2"
+
+    python3 -c "
+import json, os
+from datetime import datetime, timezone
+
+path = '${DEFERRALS_FILE}'
+data = {}
+if os.path.exists(path):
+    with open(path) as f:
+        data = json.load(f)
+
+entry = data.get('${bundle_id}', {'count': 0})
+
+# Reset hvis ny versjon
+if entry.get('version_available') != '${version}':
+    entry = {'count': 0, 'first_seen': datetime.now(timezone.utc).isoformat()}
+
+entry['count'] = entry.get('count', 0) + 1
+entry['version_available'] = '${version}'
+entry['last_deferred'] = datetime.now(timezone.utc).isoformat()
+data['${bundle_id}'] = entry
+
+with open(path, 'w') as f:
+    json.dump(data, f, indent=2)
+"
+}
+
+clear_deferral() {
+    local bundle_id="$1"
+
+    python3 -c "
+import json, os
+path = '${DEFERRALS_FILE}'
+if os.path.exists(path):
+    with open(path) as f:
+        data = json.load(f)
+    data.pop('${bundle_id}', None)
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+"
+}
+
+# ============================================================
+# 4. SWIFTDIALOG – BRUKERINTERAKSJON
+# ============================================================
+
+show_update_dialog() {
+    local updates_json="$1"
+    local remaining_deferrals="$2"
+
+    # Bygg --listitem argumenter fra JSON
+    local dialog_args=()
+    dialog_args+=(--title "Programvareoppdateringer tilgjengelig")
+    dialog_args+=(--titlefont "size=20")
+    dialog_args+=(--message "Følgende apper har nye versjoner.\nVelg hva du vil gjøre:")
+    dialog_args+=(--icon "SF=arrow.down.circle.fill,colour=blue")
+    dialog_args+=(--button1text "Oppdater nå")
+    dialog_args+=(--button2text "Utsett (${remaining_deferrals} igjen)")
+    dialog_args+=(--height 450)
+    dialog_args+=(--width 650)
+    dialog_args+=(--timer 300)
+    dialog_args+=(--json)
+
+    # Parse JSON og legg til listitems
+    while IFS= read -r line; do
+        dialog_args+=(--listitem "$line")
+    done < <(echo "$updates_json" | python3 -c "
+import json, sys
+updates = json.load(sys.stdin)
+for u in updates:
+    name = u.get('app_name', u['bundle_id'])
+    old_v = u.get('installed_version', '?')
+    new_v = u.get('latest_version', '?')
+    icon_path = ''
+    # Prøv å finne app-ikon
+    import glob
+    matches = glob.glob(f'/Applications/{name}.app/Contents/Resources/*.icns')
+    if matches:
+        icon_path = matches[0]
+    line = f\"{name}|{old_v} → {new_v}\"
+    if icon_path:
+        line += f'|icon={icon_path}'
+    line += '|statustext=Klar'
+    print(line)
+")
+
+    # Kjør dialog i brukerens kontekst
+    run_as_user "$DIALOG_BIN" "${dialog_args[@]}"
+    return $?  # 0 = button1 (oppdater), 2 = button2 (utsett), 4 = timer utløpt
+}
+
+show_forced_dialog() {
+    run_as_user "$DIALOG_BIN" \
+        --title "Obligatorisk oppdatering" \
+        --message "Du har utsatt disse oppdateringene maksimalt antall ganger.\n\nOppdateringene installeres nå." \
+        --icon "SF=exclamationmark.triangle.fill,colour=orange" \
+        --button1text "OK" \
+        --button2disabled \
+        --timer 60 \
+        --height 300 \
+        --width 500
+}
+
+show_progress_dialog() {
+    run_as_user "$DIALOG_BIN" \
+        --title "Installerer oppdateringer..." \
+        --message "Oppdateringene installeres. Du kan fortsette å jobbe." \
+        --icon "SF=arrow.down.circle.fill,colour=green" \
+        --button1text "OK" \
+        --timer 10 \
+        --height 250 \
+        --width 450
+}
+
+# ============================================================
+# 5. INSTALLER OPPDATERINGER (root-tilgang!)
+# ============================================================
+
+install_update() {
+    local bundle_id="$1"
+    local intune_app_id="$2"
+    local download_url="$3"
+
+    log "INFO" "Starter installasjon av ${bundle_id}"
+
+    # Metode 1: Direkte installasjon via nedlastet pkg/dmg
+    if [[ -n "$download_url" ]]; then
+        local temp_file
+        temp_file="${AGENT_DIR}/cache/$(basename "$download_url")"
+        mkdir -p "${AGENT_DIR}/cache"
+
+        curl -sL -o "$temp_file" "$download_url"
+
+        if [[ "$temp_file" == *.pkg ]]; then
+            installer -pkg "$temp_file" -target /
+            log "INFO" "Installerte ${bundle_id} via pkg"
+        elif [[ "$temp_file" == *.dmg ]]; then
+            local mount_point
+            mount_point=$(hdiutil attach -nobrowse -noautoopen "$temp_file" | tail -1 | awk '{print $NF}')
+            local app_path
+            app_path=$(find "$mount_point" -maxdepth 1 -name "*.app" | head -1)
+            if [[ -n "$app_path" ]]; then
+                cp -R "$app_path" /Applications/
+                log "INFO" "Installerte ${bundle_id} via dmg"
+            fi
+            hdiutil detach "$mount_point" -quiet
+        fi
+
+        rm -f "$temp_file"
+    fi
+
+    # Metode 2: Trigger Intune sync som fallback
+    # Company Portal refresh
+    if command -v open &>/dev/null; then
+        open "companyportal://refresh" 2>/dev/null || true
+    fi
+
+    clear_deferral "$bundle_id"
+    log "INFO" "Installasjon fullført for ${bundle_id}"
+}
+
+# ============================================================
+# 6. LOGG TIL API
+# ============================================================
+
+report_event() {
+    local device_serial
+    device_serial=$(ioreg -d2 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformSerialNumber/{print $4}')
+    local device_id
+    device_id=$(echo -n "$device_serial" | shasum -a 256 | awk '{print $1}')
+
+    local bundle_id="$1"
+    local action="$2"
+    local from_version="$3"
+    local to_version="$4"
+
+    curl -s -X POST "${API_BASE_URL}/log-event" \
+        -H "Content-Type: application/json" \
+        -H "x-functions-key: ${API_KEY}" \
+        -d "{
+            \"device_id\": \"${device_id}\",
+            \"bundle_id\": \"${bundle_id}\",
+            \"action\": \"${action}\",
+            \"from_version\": \"${from_version}\",
+            \"to_version\": \"${to_version}\"
+        }" 2>/dev/null || true
+}
+
+# ============================================================
+# HOVEDLOGIKK
+# ============================================================
+
+main() {
+    mkdir -p "${AGENT_DIR}/logs" "${AGENT_DIR}/cache"
+    log "INFO" "Update Agent startet"
+
+    # Sjekk at swiftDialog er installert
+    if [[ ! -x "$DIALOG_BIN" ]]; then
+        log "ERROR" "swiftDialog ikke funnet på ${DIALOG_BIN}"
+        exit 1
+    fi
+
+    # Sjekk at en bruker er innlogget
+    local current_user
+    current_user=$(get_current_user)
+    if [[ "$current_user" == "root" || "$current_user" == "loginwindow" ]]; then
+        log "INFO" "Ingen bruker innlogget, avslutter"
+        exit 0
+    fi
+
+    # 1. Skann installerte apper
+    log "INFO" "Scanner installerte apper..."
+    local installed_apps
+    installed_apps=$(scan_applications)
+
+    # 2. Sjekk mot API
+    log "INFO" "Sjekker oppdateringer mot API..."
+    local api_response
+    api_response=$(check_updates "$installed_apps")
+
+    # 3. Parse svar – del i promptable og forced
+    local updates_available
+    updates_available=$(echo "$api_response" | python3 -c "
+import json, sys
+resp = json.load(sys.stdin)
+print(json.dumps(resp.get('updates_available', [])))
+")
+
+    local update_count
+    update_count=$(echo "$updates_available" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+
+    if [[ "$update_count" -eq 0 ]]; then
+        log "INFO" "Ingen oppdateringer tilgjengelig"
+        exit 0
+    fi
+
+    log "INFO" "${update_count} oppdateringer tilgjengelig"
+
+    # 4. Kategoriser: promptable vs forced
+    local promptable_json="[]"
+    local forced_json="[]"
+    local min_remaining=$MAX_DEFERRALS
+
+    read -r promptable_json forced_json min_remaining < <(echo "$updates_available" | python3 -c "
+import json, sys, subprocess
+
+updates = json.load(sys.stdin)
+promptable = []
+forced = []
+min_remaining = ${MAX_DEFERRALS}
+
+for u in updates:
+    bid = u['bundle_id']
+    ver = u['latest_version']
+    # Les utsettelsesteller via shell (allerede tilgjengelig fra scriptet)
+    # Forenklet: les direkte fra filen
+    import os
+    deferrals_file = '${DEFERRALS_FILE}'
+    count = 0
+    if os.path.exists(deferrals_file):
+        with open(deferrals_file) as f:
+            data = json.load(f)
+        entry = data.get(bid, {})
+        if entry.get('version_available') == ver:
+            count = entry.get('count', 0)
+
+    if count >= ${MAX_DEFERRALS}:
+        forced.append(u)
+    else:
+        remaining = ${MAX_DEFERRALS} - count
+        u['remaining_deferrals'] = remaining
+        if remaining < min_remaining:
+            min_remaining = remaining
+        promptable.append(u)
+
+print(json.dumps(promptable), json.dumps(forced), min_remaining)
+")
+
+    # 5. Håndter tvungne oppdateringer (3+ utsettelser)
+    local forced_count
+    forced_count=$(echo "$forced_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+
+    if [[ "$forced_count" -gt 0 ]]; then
+        log "INFO" "Tvinger oppdatering av ${forced_count} apper"
+        show_forced_dialog
+
+        echo "$forced_json" | python3 -c "
+import json, sys
+for u in json.load(sys.stdin):
+    print(u['bundle_id'], u.get('intune_app_id',''), u.get('download_url',''), u.get('installed_version',''), u.get('latest_version',''))
+" | while read -r bid app_id dl_url old_ver new_ver; do
+            install_update "$bid" "$app_id" "$dl_url"
+            report_event "$bid" "forced" "$old_ver" "$new_ver"
+        done
+    fi
+
+    # 6. Vis prompt for vanlige oppdateringer
+    local promptable_count
+    promptable_count=$(echo "$promptable_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+
+    if [[ "$promptable_count" -gt 0 ]]; then
+        show_update_dialog "$promptable_json" "$min_remaining"
+        local dialog_exit=$?
+
+        case $dialog_exit in
+            0)  # Bruker valgte "Oppdater nå"
+                log "INFO" "Bruker valgte å oppdatere"
+                show_progress_dialog &
+
+                echo "$promptable_json" | python3 -c "
+import json, sys
+for u in json.load(sys.stdin):
+    print(u['bundle_id'], u.get('intune_app_id',''), u.get('download_url',''), u.get('installed_version',''), u.get('latest_version',''))
+" | while read -r bid app_id dl_url old_ver new_ver; do
+                    install_update "$bid" "$app_id" "$dl_url"
+                    report_event "$bid" "updated" "$old_ver" "$new_ver"
+                done
+                ;;
+            2)  # Bruker valgte "Utsett"
+                log "INFO" "Bruker utsatte oppdateringer"
+                echo "$promptable_json" | python3 -c "
+import json, sys
+for u in json.load(sys.stdin):
+    print(u['bundle_id'], u.get('latest_version',''), u.get('installed_version',''))
+" | while read -r bid new_ver old_ver; do
+                    increment_deferral "$bid" "$new_ver"
+                    report_event "$bid" "deferred" "$old_ver" "$new_ver"
+                done
+                ;;
+            4)  # Timer utløpt (behandles som utsettelse)
+                log "INFO" "Dialog-timer utløpt, behandler som utsettelse"
+                echo "$promptable_json" | python3 -c "
+import json, sys
+for u in json.load(sys.stdin):
+    print(u['bundle_id'], u.get('latest_version',''), u.get('installed_version',''))
+" | while read -r bid new_ver old_ver; do
+                    increment_deferral "$bid" "$new_ver"
+                    report_event "$bid" "deferred" "$old_ver" "$new_ver"
+                done
+                ;;
+        esac
+    fi
+
+    log "INFO" "Update Agent ferdig"
+}
+
+main "$@"
 ```
 
-### 4.2 Tvungen oppdateringsdialog (etter 3 utsettelser)
+### 3.3 Intune Platform Script-innstillinger
+
+I Intune-portalen konfigureres scriptet slik:
+
+| Innstilling | Verdi |
+|-------------|-------|
+| **Script name** | Update Agent |
+| **Script** | Last opp `update_agent.sh` |
+| **Run script as signed-in user** | **Nei** (kjører som root) |
+| **Hide script notifications** | Ja |
+| **Script frequency** | Hver 8. time (konfigurerbart) |
+| **Max retries** | 3 |
+| **Assigned groups** | Alle macOS-enheter |
+
+### 3.4 swiftDialog i brukerkontekst
+
+Nøkkelteknikken for å vise GUI fra et root-script:
 
 ```bash
-/usr/local/bin/dialog \
-  --title "Obligatorisk oppdatering" \
-  --message "Du har utsatt disse oppdateringene maksimalt antall ganger.\n\nOppdateringene vil nå installeres." \
-  --icon "caution" \
-  --button1text "OK" \
-  --button2disabled \
-  --timer 60
+# Finn innlogget bruker
+current_user=$(stat -f "%Su" /dev/console)
+uid=$(id -u "$current_user")
+
+# Kjør dialog i brukerens kontekst
+launchctl asuser "$uid" sudo -u "$current_user" /usr/local/bin/dialog \
+    --title "Oppdateringer" \
+    --message "..." \
+    --button1text "Oppdater" \
+    --button2text "Utsett"
+
+# Returkoder:
+# 0 = Button 1 (Oppdater)
+# 2 = Button 2 (Utsett)
+# 4 = Timer utløpt
 ```
 
-### 4.3 Bekreftelsesdialog
+### 3.5 Direkte installasjon (root-privilegium)
+
+Siden scriptet kjører som root, kan det installere direkte:
 
 ```bash
-/usr/local/bin/dialog \
-  --title "Oppdateringer startet" \
-  --message "Oppdateringene installeres via Intune.\n\nDu kan fortsette å jobbe." \
-  --icon "/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarInfo.icns" \
-  --button1text "OK" \
-  --timer 10
+# .pkg-filer
+installer -pkg "/path/to/app.pkg" -target /
+
+# .dmg-filer
+mount_point=$(hdiutil attach -nobrowse app.dmg | tail -1 | awk '{print $NF}')
+cp -R "${mount_point}/"*.app /Applications/
+hdiutil detach "$mount_point" -quiet
 ```
 
----
+Ingen MDM-roundtrip nødvendig! Mye raskere enn å vente på Intune sync.
 
-## Fase 5: Utsettelseslogikk
+### 3.6 Utsettelseslogikk
 
-### 5.1 Datamodell
+**Datamodell** (`/Library/Application Support/UpdateAgent/deferrals.json`):
 
 ```json
-// ~/Library/Application Support/UpdateAgent/deferrals.json
 {
   "org.mozilla.firefox": {
     "count": 2,
-    "max_deferrals": 3,
+    "version_available": "115.0.1",
     "first_seen": "2026-02-20T09:00:00Z",
-    "last_deferred": "2026-02-25T14:00:00Z",
-    "version_available": "115.0.1"
-  },
-  "com.google.Chrome": {
-    "count": 0,
-    "max_deferrals": 3,
-    "first_seen": "2026-02-26T09:00:00Z",
-    "last_deferred": null,
-    "version_available": "121.0"
+    "last_deferred": "2026-02-25T14:00:00Z"
   }
 }
 ```
 
-### 5.2 Logikk
-
-```python
-def filter_updates(self, updates):
-    """Kategoriser oppdateringer basert på utsettelsestatus."""
-    result = {"promptable": [], "forced": [], "deferred_counts": {}}
-    
-    for update in updates:
-        bid = update["bundle_id"]
-        deferral = self.deferrals.get(bid, {"count": 0})
-        
-        # Reset teller hvis versjon endret seg
-        if deferral.get("version_available") != update["latest_version"]:
-            deferral = {"count": 0, "version_available": update["latest_version"]}
-        
-        if deferral["count"] >= self.MAX_DEFERRALS:  # 3
-            result["forced"].append(update)
-        else:
-            update["remaining_deferrals"] = self.MAX_DEFERRALS - deferral["count"]
-            result["promptable"].append(update)
-    
-    return result
-```
+**Regler:**
+- Teller nullstilles når en ny versjon dukker opp fra API
+- Etter 3 utsettelser → tvungen oppdatering (ingen "Utsett"-knapp)
+- Timer-utløp (5 min) teller som utsettelse
+- Lagres i `/Library/Application Support/` (system-nivå, beskyttet mot bruker)
 
 ---
 
-## Fase 6: Distribusjon via Intune
+## Fase 4: Intune-oppsett og testing
 
-### 6.1 Komponenter å distribuere
+### 4.1 Forutsetninger i Intune
 
-| Komponent | Type | Metode |
-|-----------|------|--------|
-| Python 3.10 runtime | Framework | Shell-script + pkg |
-| Update Agent scripts | Shell script | Intune shell script |
-| swiftDialog | App | Intune DMG/PKG |
-| LaunchAgent plist | Config | Intune configuration profile |
-| API-nøkkel | Credential | macOS Keychain via script |
+| Komponent | Type i Intune | Merknad |
+|-----------|--------------|---------|
+| **swiftDialog** | macOS LOB app (pkg) | Må installeres **før** platform scriptet |
+| **update_agent.sh** | Platform Script (shell) | Hovednscriptet |
+| **config.json** | Platform Script (shell) | Separat script som oppretter config |
 
-### 6.2 Pakkering
+### 4.2 Konfigurasjonsskript (kjøres én gang)
+
+Eget platform script for førstegangsoppsett:
 
 ```bash
-# Bygg intune-pakke
 #!/bin/bash
-# build.sh
+# setup_update_agent.sh – Kjøres én gang for å sette opp konfigurasjon
 
 AGENT_DIR="/Library/Application Support/UpdateAgent"
-LAUNCH_AGENT="com.company.updateagent.plist"
+mkdir -p "${AGENT_DIR}/logs" "${AGENT_DIR}/cache"
 
-# Kopier filer
-mkdir -p "$AGENT_DIR"
-cp -r update_agent/* "$AGENT_DIR/"
-cp config/config.plist "$AGENT_DIR/"
+cat > "${AGENT_DIR}/config.json" << 'EOF'
+{
+    "api_base_url": "https://yourfunc.azurewebsites.net/api",
+    "api_key": "din-api-nøkkel",
+    "max_deferrals": 3,
+    "dialog_timeout_seconds": 300,
+    "scan_paths": ["/Applications", "/Applications/Utilities"]
+}
+EOF
 
-# Installer LaunchAgent
-cp "config/$LAUNCH_AGENT" /Library/LaunchAgents/
-chmod 644 "/Library/LaunchAgents/$LAUNCH_AGENT"
-
-# Last inn LaunchAgent for alle innloggede brukere
-logged_in_user=$(stat -f "%Su" /dev/console)
-launchctl bootstrap "gui/$(id -u $logged_in_user)" "/Library/LaunchAgents/$LAUNCH_AGENT"
+chmod 600 "${AGENT_DIR}/config.json"
+echo "Update Agent konfigurert"
 ```
+
+### 4.3 Testplan
+
+| Steg | Test | Forventet resultat |
+|------|------|-------------------|
+| 1 | Installer swiftDialog | `/usr/local/bin/dialog` finnes |
+| 2 | Kjør setup-script | Config-fil opprettet |
+| 3 | Kjør update_agent.sh manuelt | Skanner apper, kontakter API |
+| 4 | Mock API med oppdateringer | Dialog vises med appliste |
+| 5 | Klikk "Oppdater" | App installeres, teller nullstilt |
+| 6 | Klikk "Utsett" 3 ganger | 4. kjøring viser tvungen dialog |
+| 7 | La timer løpe ut | Teller som utsettelse |
+| 8 | Ny versjon fra API | Teller nullstilles |
 
 ---
 
-## Fase 7: App-request (fremtidig utvidelse)
+## Fase 5: App-request (fremtidig utvidelse)
 
-### 7.1 Konsept
+### 5.1 Konsept
 
 Brukere kan be om at nye apper gjøres tilgjengelig:
 
@@ -542,7 +953,7 @@ Brukere kan be om at nye apper gjøres tilgjengelig:
 4. Admin varsles (e-post/Teams-melding via Logic App)
 5. Admin godkjenner → AutoPkg-resept opprettes → App pakkes → Tilgjengelig i Intune
 
-### 7.2 API
+### 5.2 API
 
 ```
 POST /api/request-app
@@ -561,13 +972,13 @@ POST /api/request-app
 
 | Valg | Alternativ | Begrunnelse |
 |------|-----------|-------------|
-| **Python klientagent** | Swift app | Lettere å vedlikeholde for team som allerede bruker AutoPkg (Python). Mindre kompileringskompleksitet. |
-| **swiftDialog for UI** | osascript / PyObjC | Native utseende, aktivt vedlikeholdt, enkel å bruke fra kommandolinje. |
+| **Intune Platform Script (bash)** | Python LaunchAgent / Swift app | Kjører som root (kan installere direkte), innebygd scheduling, én fil å vedlikeholde, ingen runtime-avhengighet å distribuere. |
+| **swiftDialog for UI** | osascript / PyObjC | Native utseende, aktivt vedlikeholdt, enkel å bruke fra kommandolinje. `launchctl asuser` viser GUI fra root-kontekst. |
 | **Azure Function** | Direkte Graph API | Sentralisert logikk, caching, enklere klientautentisering, utvidbar. |
 | **Azure Table Storage** | CosmosDB / SQL | Billigst, enklest for key-value data. Nok for dette brukstilfellet. |
-| **LaunchAgent** | LaunchDaemon | Kjører i brukerens kontekst (kan vise dialoger). LaunchDaemon kan ikke vise GUI. |
-| **MDM sync + assignment** | Direkte download | Respekterer Intune-policyer, ingen admin-rettigheter nødvendig. |
-| **Maks 3 utsettelser** | Konfigurerbar | Hardkodet default, kan overstyres via config.plist eller MDM-profil. |
+| **Direkte installasjon (root)** | MDM sync + assignment | Mye raskere enn Intune roundtrip. Root-tilgang fra platform script gjør dette mulig. Intune sync som fallback. |
+| **Maks 3 utsettelser** | Konfigurerbar | Default i config.json, kan endres per gruppe via separate konfigurasjonsscript. |
+| **System-level lagring** | Per-bruker lagring | `/Library/Application Support/UpdateAgent/` er beskyttet mot brukerendringer. Root-tilgang sikrer integritet. |
 
 ---
 
@@ -575,16 +986,18 @@ POST /api/request-app
 
 Etter godkjenning av denne planen:
 
-1. **Start med Fase 1** – Opprette Azure Function App med de tre kjerneendepunktene
-2. **Parallelt Fase 2** – Lage AutoPkg postprocessor
-3. **Deretter Fase 3-4** – Klientagent + UI
-4. **Testing Fase 5-6** – Utsettelseslogikk og distribusjon
+1. **Fase 1** – Opprette Azure Function App med kjerneendepunktene
+2. **Fase 2** (parallelt) – Lage AutoPkg VersionReporter postprocessor
+3. **Fase 3** – Platform Script med swiftDialog-integrasjon og utsettelseslogikk
+4. **Fase 4** – Intune-oppsett, swiftDialog-distribusjon og end-to-end testing
 
 ### Åpne spørsmål
 
 - [ ] Hva skal firmaprefikset være? (f.eks. `com.firma.updateagent`)
 - [ ] Har dere en eksisterende Azure Function App, eller skal vi opprette ny?
 - [ ] Hvilke apper er viktigst å starte med? (Firefox, Chrome, Teams, etc.)
-- [ ] Skal tvungne oppdateringer tillate en grace period (f.eks. 30 min) eller kjøre umiddelbart?
-- [ ] Ønsker dere logging/rapportering av oppdateringsstatus per enhet?
-- [ ] Skal agenten fungere offline (cached versjonsliste)?
+- [ ] Skal tvungne oppdateringer ha en grace period (f.eks. 30 min nedtelling) eller kjøres umiddelbart?
+- [ ] Ønsker dere logging/rapportering av oppdateringsstatus per enhet til f.eks. Log Analytics?
+- [ ] Skal agenten fungere offline (cached versjonsliste fra siste API-kall)?
+- [ ] Har dere allerede swiftDialog distribuert, eller må det pakkes?
+- [ ] Skal download-URL for direkte installasjon komme fra API (Azure Blob Storage) eller fra Intune?
