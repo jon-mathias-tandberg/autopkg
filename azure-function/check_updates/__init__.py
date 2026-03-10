@@ -37,7 +37,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     if not installed_apps:
         return _json(400, {"error": "installed_apps is required"})
 
-    managed = get_all_managed_apps()
+    try:
+        managed = get_all_managed_apps()
+    except Exception as exc:
+        logging.error("Failed to read ManagedApps table: %s", exc)
+        return _json(500, {"error": f"Table Storage error: {exc}"})
 
     updates, up_to_date, not_managed = [], [], []
 
