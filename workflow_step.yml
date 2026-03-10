@@ -1,0 +1,12 @@
+    # === LEGG TIL DETTE STEGET ETTER "Create token file and run AutoPkg" ===
+
+    - name: Register packages for Update Agent
+      if: always()
+      env:
+        UPDATE_AGENT_BLOB_CONNECTION_STRING: ${{ secrets.UPDATE_AGENT_BLOB_CONNECTION_STRING }}
+        UPDATE_AGENT_API_URL: ${{ secrets.UPDATE_AGENT_API_URL }}
+        UPDATE_AGENT_API_KEY: ${{ secrets.UPDATE_AGENT_API_KEY }}
+      run: |
+        echo "📦 === REGISTERING PACKAGES FOR UPDATE AGENT ==="
+        python autopkg_tools/register_packages.py
+        echo "📦 === END PACKAGE REGISTRATION ==="
