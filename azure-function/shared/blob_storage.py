@@ -7,6 +7,39 @@ from datetime import datetime, timedelta, timezone
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 
 
+def _parse_connection_string(conn_str: str) -> dict[str, str]:
+    """Extract key=value pairs from a storage connection string."""
+    parts = {}
+    for segment in conn_str.split(";"):
+        if "=" in segment:
+            key, _, val = segment.partition("=")
+            parts[key.strip()] = val.strip()
+    return parts
+
+
+def _get_storage_credentials() -> tuple[str, str, str]:
+    """Return (account_name, account_key, container) from environment."""
+    account_name = os.environ.get("AZURE_STORAGE_ACCOUNT", "")
+    account_key = os.environ.get("STORAGE_ACCOUNT_KEY", "")
+    container = os.environ.get(
+        "UPDATE_AGENT_BLOB_CONTAINER",
+        os.environ.get("BLOB_CONTAINER_NAME", "packages"),
+    )
+
+    if not account_key:
+        conn_str = os.environ.get(
+            "AZURE_STORAGE_CONNECTION_STRING",
+            os.environ.get("AzureWebJobsStorage", ""),
+        )
+        if conn_str:
+            parts = _parse_connection_string(conn_str)
+            account_key = parts.get("AccountKey", "")
+            if not account_name:
+                account_name = parts.get("AccountName", "")
+
+    return account_name, account_key, container
+
+
 def generate_download_url(blob_path: str) -> tuple[str, str]:
     """Return (sas_url, expiry_iso) for a package blob.
 
@@ -14,18 +47,7 @@ def generate_download_url(blob_path: str) -> tuple[str, str]:
     (default 15 minutes).  Returns empty strings if storage account key
     is not configured.
     """
-    account_name = os.environ.get(
-        "AZURE_STORAGE_ACCOUNT",
-        os.environ.get("STORAGE_ACCOUNT_NAME", ""),
-    )
-    account_key = os.environ.get(
-        "STORAGE_ACCOUNT_KEY",
-        os.environ.get("AZURE_STORAGE_KEY", ""),
-    )
-    container = os.environ.get(
-        "AZURE_STORAGE_CONTAINER",
-        os.environ.get("BLOB_CONTAINER_NAME", "packages"),
-    )
+    account_name, account_key, container = _get_storage_credentials()
 
     if not account_name or not account_key:
         logging.warning(
