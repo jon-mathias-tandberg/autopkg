@@ -33,17 +33,26 @@ log_event/
 shared/
 ```
 
-### 3. Legg til Environment Variables
+### 3. Environment Variables
 
-I Azure Portal → `autopkg-api-func` → Settings → Environment variables:
+Koden bruker variablene som **allerede finnes** i `autopkg-api-func`:
 
-| Variabel | Verdi | Beskrivelse |
-|----------|-------|-------------|
-| `STORAGE_CONNECTION_STRING` | `DefaultEndpointsProtocol=https;AccountName=...` | Connection string til Storage Account |
-| `STORAGE_ACCOUNT_NAME` | `dittlagringsnavn` | Storage Account navn (for SAS) |
-| `STORAGE_ACCOUNT_KEY` | `din-nøkkel` | Storage Account key (for SAS) |
-| `BLOB_CONTAINER_NAME` | `packages` | Blob container for .pkg/.dmg filer |
-| `SAS_TOKEN_EXPIRY_MINUTES` | `15` | SAS-token levetid (minutter) |
+| Eksisterende variabel | Brukes til |
+|----------------------|------------|
+| `AZURE_STORAGE_ACCOUNT` | Storage Account-navn (for SAS-token) |
+| `AZURE_STORAGE_CONNECTION_STRING` | Table Storage-tilkobling |
+| `AZURE_STORAGE_CONTAINER` | Blob container (brukes for pakker) |
+
+Du trenger kun å legge til **én ny variabel**:
+
+| Ny variabel | Verdi | Beskrivelse |
+|-------------|-------|-------------|
+| `STORAGE_ACCOUNT_KEY` | Din Storage Account access key | Kreves for å generere SAS-tokens |
+| `SAS_TOKEN_EXPIRY_MINUTES` | `15` | (Valgfri) SAS-token levetid, default 15 min |
+
+> **Merk**: Hvis Function App-en har Managed Identity med "Storage Blob Data Owner"
+> (som den allerede har på `autopkgapi`), kan SAS-generering i fremtiden byttes til
+> User Delegation SAS for å unngå account key.
 
 > `TABLE_MANAGED_APPS` og `TABLE_UPDATE_EVENTS` er valgfrie
 > (default: `ManagedApps` og `UpdateEvents`).

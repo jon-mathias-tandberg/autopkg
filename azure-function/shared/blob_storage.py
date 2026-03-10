@@ -12,9 +12,18 @@ def generate_download_url(blob_path: str) -> tuple[str, str]:
     The SAS token is read-only and expires after SAS_TOKEN_EXPIRY_MINUTES
     (default 15 minutes).
     """
-    account_name = os.environ["STORAGE_ACCOUNT_NAME"]
-    account_key = os.environ["STORAGE_ACCOUNT_KEY"]
-    container = os.environ.get("BLOB_CONTAINER_NAME", "packages")
+    account_name = os.environ.get(
+        "AZURE_STORAGE_ACCOUNT",
+        os.environ.get("STORAGE_ACCOUNT_NAME", ""),
+    )
+    account_key = os.environ.get(
+        "STORAGE_ACCOUNT_KEY",
+        os.environ.get("AZURE_STORAGE_KEY", ""),
+    )
+    container = os.environ.get(
+        "AZURE_STORAGE_CONTAINER",
+        os.environ.get("BLOB_CONTAINER_NAME", "packages"),
+    )
     expiry_minutes = int(os.environ.get("SAS_TOKEN_EXPIRY_MINUTES", "15"))
 
     expiry = datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes)

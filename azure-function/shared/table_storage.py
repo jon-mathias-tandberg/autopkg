@@ -11,13 +11,17 @@ from azure.data.tables import TableServiceClient
 
 
 def _get_connection_string() -> str:
-    for key in ("STORAGE_CONNECTION_STRING", "AzureWebJobsStorage"):
+    for key in (
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "STORAGE_CONNECTION_STRING",
+        "AzureWebJobsStorage",
+    ):
         val = os.environ.get(key, "")
         if val and val != "UseDevelopmentStorage=true":
             return val
     raise RuntimeError(
         "No storage connection string found. "
-        "Set STORAGE_CONNECTION_STRING or AzureWebJobsStorage."
+        "Set AZURE_STORAGE_CONNECTION_STRING or AzureWebJobsStorage."
     )
 
 
