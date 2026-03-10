@@ -18,24 +18,27 @@ def _parse_connection_string(conn_str: str) -> dict[str, str]:
 
 
 def _get_storage_credentials() -> tuple[str, str, str]:
-    """Return (account_name, account_key, container) from environment."""
-    account_name = os.environ.get("AZURE_STORAGE_ACCOUNT", "")
-    account_key = os.environ.get("STORAGE_ACCOUNT_KEY", "")
-    container = os.environ.get(
-        "UPDATE_AGENT_BLOB_CONTAINER",
-        os.environ.get("BLOB_CONTAINER_NAME", "packages"),
-    )
+    """Return (account_name, account_key, container) from environment.
 
-    if not account_key:
+    Looks for a dedicated blob connection string first
+    (UPDATE_AGENT_BLOB_CONNECTION_STRING), then falls back to the
+    general storage connection strings.
+    """
+    container = os.environ.get("UPDATE_AGENT_BLOB_CONTAINER", "packages")
+
+    conn_str = os.environ.get("UPDATE_AGENT_BLOB_CONNECTION_STRING", "")
+    if not conn_str:
         conn_str = os.environ.get(
             "AZURE_STORAGE_CONNECTION_STRING",
             os.environ.get("AzureWebJobsStorage", ""),
         )
-        if conn_str:
-            parts = _parse_connection_string(conn_str)
-            account_key = parts.get("AccountKey", "")
-            if not account_name:
-                account_name = parts.get("AccountName", "")
+
+    account_name = ""
+    account_key = ""
+    if conn_str:
+        parts = _parse_connection_string(conn_str)
+        account_name = parts.get("AccountName", "")
+        account_key = parts.get("AccountKey", "")
 
     return account_name, account_key, container
 
