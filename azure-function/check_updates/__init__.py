@@ -1,7 +1,7 @@
 """POST /api/check-updates
 
-Receives a list of installed apps from a macOS client, compares against
-managed app versions, and returns available updates with short-lived
+Receives installed apps from a macOS client, compares against the
+ManagedApps table, and returns available updates with short-lived
 SAS download URLs.
 """
 
@@ -13,14 +13,17 @@ import azure.functions as func
 from shared.blob_storage import generate_download_url
 from shared.table_storage import get_all_managed_apps
 
-from packaging.version import Version, InvalidVersion
+try:
+    from packaging.version import InvalidVersion, Version
 
+    def _newer(installed: str, latest: str) -> bool:
+        try:
+            return Version(latest) > Version(installed)
+        except InvalidVersion:
+            return installed != latest
 
-def _is_update_available(installed: str, latest: str) -> bool:
-    """Return True if latest is newer than installed."""
-    try:
-        return Version(latest) > Version(installed)
-    except InvalidVersion:
+except ImportError:
+    def _newer(installed: str, latest: str) -> bool:
         return installed != latest
 
 
@@ -28,86 +31,66 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
     except ValueError:
-        return func.HttpResponse(
-            json.dumps({"error": "Invalid JSON"}),
-            status_code=400,
-            mimetype="application/json",
-        )
+        return _json(400, {"error": "Invalid JSON"})
 
     installed_apps = body.get("installed_apps", [])
     if not installed_apps:
-        return func.HttpResponse(
-            json.dumps({"error": "installed_apps is required"}),
-            status_code=400,
-            mimetype="application/json",
-        )
+        return _json(400, {"error": "installed_apps is required"})
 
-    managed_apps = get_all_managed_apps()
+    managed = get_all_managed_apps()
 
-    updates_available = []
-    up_to_date = []
-    not_managed = []
+    updates, up_to_date, not_managed = [], [], []
 
     for app in installed_apps:
-        bundle_id = app.get("bundle_id", "")
-        installed_version = app.get("version", "0")
-
-        if not bundle_id:
+        bid = app.get("bundle_id", "")
+        if not bid:
             continue
 
-        managed = managed_apps.get(bundle_id)
-        if managed is None:
-            not_managed.append({"bundle_id": bundle_id})
+        entry = managed.get(bid)
+        if entry is None:
+            not_managed.append({"bundle_id": bid})
             continue
 
-        latest_version = managed.get("latest_version", "")
-        if not latest_version or not _is_update_available(
-            installed_version, latest_version
-        ):
-            up_to_date.append(
-                {
-                    "bundle_id": bundle_id,
-                    "app_name": managed.get("app_name", ""),
-                }
-            )
+        latest = entry.get("latest_version", "")
+        installed = app.get("version", "0")
+
+        if not latest or not _newer(installed, latest):
+            up_to_date.append({
+                "bundle_id": bid,
+                "app_name": entry.get("app_name", ""),
+            })
             continue
 
-        blob_path = managed.get("blob_path", "")
-        download_url = ""
-        sas_expires_at = ""
-        download_filename = ""
-
+        blob_path = entry.get("blob_path", "")
+        dl_url, sas_exp = ("", "")
+        dl_file = ""
         if blob_path:
-            download_url, sas_expires_at = generate_download_url(blob_path)
-            download_filename = blob_path.rsplit("/", 1)[-1] if "/" in blob_path else blob_path
+            dl_url, sas_exp = generate_download_url(blob_path)
+            dl_file = blob_path.rsplit("/", 1)[-1]
 
-        updates_available.append(
-            {
-                "bundle_id": bundle_id,
-                "app_name": managed.get("app_name", ""),
-                "installed_version": installed_version,
-                "latest_version": latest_version,
-                "download_url": download_url,
-                "download_filename": download_filename,
-                "sas_expires_at": sas_expires_at,
-            }
-        )
-
-    result = {
-        "updates_available": updates_available,
-        "up_to_date": up_to_date,
-        "not_managed": not_managed,
-    }
+        updates.append({
+            "bundle_id": bid,
+            "app_name": entry.get("app_name", ""),
+            "installed_version": installed,
+            "latest_version": latest,
+            "download_url": dl_url,
+            "download_filename": dl_file,
+            "sas_expires_at": sas_exp,
+        })
 
     logging.info(
-        "check-updates: %d updates, %d up-to-date, %d not managed",
-        len(updates_available),
-        len(up_to_date),
-        len(not_managed),
+        "check-updates: %d updates, %d current, %d unmanaged",
+        len(updates), len(up_to_date), len(not_managed),
     )
 
+    return _json(200, {
+        "updates_available": updates,
+        "up_to_date": up_to_date,
+        "not_managed": not_managed,
+    })
+
+
+def _json(status: int, body: dict) -> func.HttpResponse:
     return func.HttpResponse(
-        json.dumps(result),
-        status_code=200,
-        mimetype="application/json",
+        json.dumps(body), status_code=status, mimetype="application/json",
     )

@@ -1,8 +1,7 @@
 """POST /api/register-version
 
-Called by AutoPkg VersionReporter postprocessor after a successful
-packaging run.  Registers (or updates) a managed app's latest version
-and blob path in Table Storage.
+Called by the AutoPkg VersionReporter postprocessor after successful
+packaging.  Upserts a managed app entry in Table Storage.
 """
 
 import json
@@ -17,42 +16,29 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
     except ValueError:
-        return func.HttpResponse(
-            json.dumps({"error": "Invalid JSON"}),
-            status_code=400,
-            mimetype="application/json",
-        )
+        return _json(400, {"error": "Invalid JSON"})
 
-    bundle_id = body.get("bundle_id", "")
-    latest_version = body.get("latest_version", "")
+    bid = body.get("bundle_id", "")
+    ver = body.get("latest_version", "")
 
-    if not bundle_id or not latest_version:
-        return func.HttpResponse(
-            json.dumps({"error": "bundle_id and latest_version are required"}),
-            status_code=400,
-            mimetype="application/json",
-        )
+    if not bid or not ver:
+        return _json(400, {"error": "bundle_id and latest_version are required"})
 
     upsert_managed_app(
-        bundle_id=bundle_id,
+        bundle_id=bid,
         app_name=body.get("app_name", ""),
-        latest_version=latest_version,
+        latest_version=ver,
         blob_path=body.get("blob_path", ""),
         intune_app_id=body.get("intune_app_id", ""),
         recipe_id=body.get("recipe_id", ""),
         min_os_version=body.get("min_os_version", ""),
     )
 
-    logging.info("register-version: %s v%s", bundle_id, latest_version)
+    logging.info("register-version: %s v%s", bid, ver)
+    return _json(200, {"status": "ok", "bundle_id": bid, "latest_version": ver})
 
+
+def _json(status: int, body: dict) -> func.HttpResponse:
     return func.HttpResponse(
-        json.dumps(
-            {
-                "status": "ok",
-                "bundle_id": bundle_id,
-                "latest_version": latest_version,
-            }
-        ),
-        status_code=200,
-        mimetype="application/json",
+        json.dumps(body), status_code=status, mimetype="application/json",
     )

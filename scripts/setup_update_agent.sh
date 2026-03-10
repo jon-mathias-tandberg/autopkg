@@ -15,8 +15,8 @@ mkdir -p "${AGENT_DIR}/logs" "${AGENT_DIR}/cache"
 if [[ ! -f "${AGENT_DIR}/config.json" ]]; then
     cat > "${AGENT_DIR}/config.json" << 'EOF'
 {
-    "api_base_url": "https://YOUR-FUNCTION-APP.azurewebsites.net/api",
-    "api_key": "YOUR-FUNCTION-KEY",
+    "api_base_url": "https://autopkg-api-func-XXXXX.norwayeast-01.azurewebsites.net/api",
+    "api_key": "YOUR-FUNCTION-KEY-FROM-APP-KEYS",
     "max_deferrals": 3,
     "dialog_timeout_seconds": 300,
     "work_hours_start": 8,

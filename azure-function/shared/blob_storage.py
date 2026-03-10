@@ -1,4 +1,4 @@
-"""Azure Blob Storage helpers – SAS token generation for package downloads."""
+"""Azure Blob Storage helper – short-lived SAS token generation."""
 
 import os
 from datetime import datetime, timedelta, timezone
@@ -7,9 +7,10 @@ from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 
 
 def generate_download_url(blob_path: str) -> tuple[str, str]:
-    """Generate a short-lived SAS URL for downloading a package.
+    """Return (sas_url, expiry_iso) for a package blob.
 
-    Returns (download_url, expiry_iso) tuple.
+    The SAS token is read-only and expires after SAS_TOKEN_EXPIRY_MINUTES
+    (default 15 minutes).
     """
     account_name = os.environ["STORAGE_ACCOUNT_NAME"]
     account_key = os.environ["STORAGE_ACCOUNT_KEY"]
@@ -18,7 +19,7 @@ def generate_download_url(blob_path: str) -> tuple[str, str]:
 
     expiry = datetime.now(timezone.utc) + timedelta(minutes=expiry_minutes)
 
-    sas_token = generate_blob_sas(
+    token = generate_blob_sas(
         account_name=account_name,
         container_name=container,
         blob_name=blob_path,
@@ -27,5 +28,8 @@ def generate_download_url(blob_path: str) -> tuple[str, str]:
         expiry=expiry,
     )
 
-    url = f"https://{account_name}.blob.core.windows.net/{container}/{blob_path}?{sas_token}"
+    url = (
+        f"https://{account_name}.blob.core.windows.net"
+        f"/{container}/{blob_path}?{token}"
+    )
     return url, expiry.isoformat()
