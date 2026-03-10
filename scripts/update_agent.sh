@@ -323,6 +323,113 @@ show_notification() {
 }
 
 # ============================================================
+# WAIT FOR APP TO QUIT
+# ============================================================
+MAX_QUIT_WAIT=600       # Max seconds to wait for app to close (10 min)
+QUIT_CHECK_INTERVAL=5   # Seconds between checks
+
+app_is_running() {
+    local bundle_id="$1"
+    pgrep -f "CFBundleIdentifier.*${bundle_id}" &>/dev/null && return 0
+    # More reliable: check via lsappinfo or osascript
+    local running
+    running=$(osascript -e "
+        tell application \"System Events\"
+            set bundleIds to bundle identifier of every process
+        end tell
+        if bundleIds contains \"${bundle_id}\" then
+            return \"yes\"
+        else
+            return \"no\"
+        end if
+    " 2>/dev/null) || running="no"
+    [[ "$running" == "yes" ]]
+}
+
+get_app_name_for_bundle() {
+    local bundle_id="$1"
+    osascript -e "
+        tell application \"System Events\"
+            try
+                set appName to displayed name of (first process whose bundle identifier is \"${bundle_id}\")
+                return appName
+            on error
+                return \"\"
+            end try
+        end tell
+    " 2>/dev/null || echo ""
+}
+
+wait_for_app_to_quit() {
+    local bundle_id="$1"
+
+    if ! app_is_running "$bundle_id"; then
+        return 0
+    fi
+
+    local app_display_name
+    app_display_name=$(get_app_name_for_bundle "$bundle_id")
+    if [[ -z "$app_display_name" ]]; then
+        app_display_name="$bundle_id"
+    fi
+
+    log "INFO" "App running: ${app_display_name} (${bundle_id}) – asking user to close"
+
+    local waited=0
+    local prompted=false
+
+    while app_is_running "$bundle_id"; do
+        if [[ $waited -ge $MAX_QUIT_WAIT ]]; then
+            log "WARN" "Timed out waiting for ${app_display_name} to quit after ${MAX_QUIT_WAIT}s"
+            if user_is_logged_in; then
+                run_as_user osascript -e "
+                    display alert \"Kunne ikke oppdatere ${app_display_name}\" message \"Programmet ble ikke lukket innen tidsfristen. Oppdateringen vil bli forsøkt igjen ved neste kjøring.\" as warning buttons {\"OK\"} default button \"OK\" giving up after 30
+                " 2>/dev/null || true
+            fi
+            return 1
+        fi
+
+        if ! $prompted && user_is_logged_in; then
+            prompted=true
+            # Ask user to close the app – non-blocking approach:
+            # First try graceful quit via osascript, then show dialog
+            local user_choice
+            user_choice=$(run_as_user osascript -e "
+                try
+                    set result to display dialog \"${app_display_name} må lukkes for å installere oppdateringen.\" & return & return & \"Vil du lukke ${app_display_name} nå?\" with title \"Oppdatering venter\" buttons {\"Lukk ${app_display_name}\", \"Vent\"} default button \"Lukk ${app_display_name}\" giving up after 120 with icon caution
+                    if gave up of result then
+                        return \"wait\"
+                    end if
+                    return button returned of result
+                on error
+                    return \"wait\"
+                end try
+            " 2>/dev/null) || user_choice="wait"
+
+            if [[ "$user_choice" == *"Lukk"* ]]; then
+                log "INFO" "User chose to quit ${app_display_name}"
+                osascript -e "
+                    try
+                        tell application id \"${bundle_id}\" to quit
+                    end try
+                " 2>/dev/null || true
+                sleep 3
+                # If still running after graceful quit, wait longer
+                if app_is_running "$bundle_id"; then
+                    log "INFO" "App still running after quit request, waiting..."
+                fi
+            fi
+        fi
+
+        sleep "$QUIT_CHECK_INTERVAL"
+        waited=$((waited + QUIT_CHECK_INTERVAL))
+    done
+
+    log "INFO" "${app_display_name} has quit, proceeding with install"
+    return 0
+}
+
+# ============================================================
 # PACKAGE INSTALLATION (runs as root)
 # ============================================================
 install_update() {
@@ -335,11 +442,24 @@ install_update() {
         return 1
     fi
 
+    # Wait for the app to quit before installing
+    if ! wait_for_app_to_quit "$bundle_id"; then
+        log "WARN" "Skipping ${bundle_id} – app still running"
+        return 1
+    fi
+
     log "INFO" "Downloading ${bundle_id}: ${download_filename}"
     local temp_file="${AGENT_DIR}/cache/${download_filename}"
 
     if ! curl -sfL -o "$temp_file" "$download_url" 2>> "$LOG_FILE"; then
         log "ERROR" "Download failed for ${bundle_id}"
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    # Final check right before overwriting – app might have reopened
+    if app_is_running "$bundle_id"; then
+        log "WARN" "App reopened during download, aborting install for ${bundle_id}"
         rm -f "$temp_file"
         return 1
     fi

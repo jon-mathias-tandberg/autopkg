@@ -991,6 +991,27 @@ hdiutil detach "$mount_point" -quiet
 
 Ingen MDM-roundtrip nødvendig! Mye raskere enn å vente på Intune sync.
 
+#### Vent-på-lukking-logikk
+
+Før installasjon sjekker scriptet om appen kjører (`app_is_running` via `System Events`):
+
+```
+┌─ Er appen åpen? ──────────────────────────────────────────────┐
+│                                                                │
+│  NEI → Installer umiddelbart                                   │
+│                                                                │
+│  JA  → Vis dialog: "Firefox må lukkes for å oppdatere"         │
+│        Knapper: [Lukk Firefox] / [Vent]                        │
+│                                                                │
+│        "Lukk" → Sender `quit` til appen, venter på avslutning  │
+│        "Vent" → Sjekker hvert 5. sekund i opp til 10 minutter  │
+│                                                                │
+│        Appen lukket → Installer                                │
+│        Timeout (10 min) → Hopp over, prøv igjen neste kjøring  │
+│        Appen gjenåpnet etter nedlasting → Avbryt installasjon  │
+└────────────────────────────────────────────────────────────────┘
+```
+
 ### 3.6 Utsettelseslogikk
 
 **Datamodell** (`/Library/Application Support/UpdateAgent/deferrals.json`):
