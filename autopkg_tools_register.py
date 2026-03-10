@@ -86,23 +86,42 @@ def extract_metadata(recipe_path: str, filename: str) -> dict:
 
 
 def upload_to_blob(filepath: str, blob_path: str) -> bool:
-    """Upload a file to Azure Blob Storage using az CLI."""
-    conn_str = os.environ.get("UPDATE_AGENT_BLOB_CONNECTION_STRING", "")
-    if not conn_str:
-        print(f"⚠️  UPDATE_AGENT_BLOB_CONNECTION_STRING not set, skipping upload")
-        return False
+    """Upload a file to Azure Blob Storage using az CLI.
 
+    Uses the existing az login session (OIDC) if available,
+    falls back to connection string.
+    """
+    storage_account = os.environ.get("UPDATE_AGENT_BLOB_ACCOUNT", "autopkgapi")
+
+    # Try OIDC/az login session first (no connection string needed)
     cmd = [
         "az", "storage", "blob", "upload",
+        "--account-name", storage_account,
         "--container-name", BLOB_CONTAINER,
         "--name", blob_path,
         "--file", filepath,
-        "--connection-string", conn_str,
         "--overwrite", "true",
+        "--auth-mode", "login",
         "--no-progress",
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        # Fallback to connection string
+        conn_str = os.environ.get("UPDATE_AGENT_BLOB_CONNECTION_STRING", "")
+        if conn_str:
+            cmd = [
+                "az", "storage", "blob", "upload",
+                "--container-name", BLOB_CONTAINER,
+                "--name", blob_path,
+                "--file", filepath,
+                "--connection-string", conn_str,
+                "--overwrite", "true",
+                "--no-progress",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
     if result.returncode != 0:
         print(f"❌ Blob upload failed: {result.stderr}")
         return False
