@@ -281,8 +281,23 @@ for u in updates:
 }
 
 # ============================================================
-# OSASCRIPT DIALOGS
+# OSASCRIPT DIALOGS & NOTIFICATIONS
 # ============================================================
+
+# Notification (non-blocking, appears in top-right corner)
+show_update_notification() {
+    local app_list="$1"
+    local remaining="$2"
+
+    run_as_user osascript -e "
+        display notification \"${app_list}\" with title \"Oppdateringer tilgjengelig\" subtitle \"${remaining} utsettelser igjen\"
+    " 2>/dev/null || true
+
+    # Return 0 = treat as "schedule for tonight" (non-blocking default)
+    return 0
+}
+
+# Dialog with buttons (blocking, for last-chance warning before forced)
 show_update_dialog() {
     local app_list="$1"
     local remaining="$2"
@@ -314,6 +329,7 @@ APPLESCRIPT
     esac
 }
 
+# Forced update alert (critical, no defer option)
 show_forced_dialog() {
     local app_list="$1"
 
@@ -322,6 +338,7 @@ show_forced_dialog() {
     " 2>/dev/null || true
 }
 
+# Simple notification (non-blocking)
 show_notification() {
     local title="$1"
     local message="$2"
@@ -616,7 +633,7 @@ main() {
         install_updates_from_json "$forced_json" "forced"
     fi
 
-    # ── STEP 6: Prompt user for remaining updates ──
+    # ── STEP 6: Handle remaining updates ──
     if [[ "$promptable_count" -gt 0 ]]; then
         if ! user_is_logged_in; then
             log "INFO" "No user logged in – queuing updates for later"
@@ -627,52 +644,71 @@ main() {
         local promptable_list
         promptable_list=$(format_app_list "$promptable_json")
 
-        show_update_dialog "$promptable_list" "$min_remaining"
-        local dialog_exit=$?
+        if [[ "$min_remaining" -le 1 ]]; then
+            # Last chance – show blocking dialog with buttons
+            log "INFO" "Last deferral remaining – showing blocking dialog"
+            show_update_dialog "$promptable_list" "$min_remaining"
+            local dialog_exit=$?
 
-        case $dialog_exit in
-            0)  # User chose "Installer i kveld"
-                log "INFO" "User approved updates"
-                if is_within_work_hours; then
-                    echo "$promptable_json" > "$PENDING_FILE"
-                    show_notification "Oppdateringer planlagt" "Installeres utenfor arbeidstid"
+            case $dialog_exit in
+                0)  # User chose "Installer i kveld"
+                    log "INFO" "User approved updates"
+                    if is_within_work_hours; then
+                        echo "$promptable_json" > "$PENDING_FILE"
+                        show_notification "Oppdateringer planlagt" "Installeres utenfor arbeidstid"
+                        python3 -c "
+import json, sys
+for u in json.loads(sys.argv[1]):
+    print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
+" "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
+                            report_event "$bid" "scheduled" "$old_ver" "$new_ver"
+                        done
+                    else
+                        show_notification "Installerer oppdateringer" "Oppdateringene installeres nå."
+                        install_updates_from_json "$promptable_json" "updated"
+                    fi
+                    ;;
+
+                2)  # User chose "Utsett"
+                    log "INFO" "User deferred updates (last chance)"
+                    increment_deferrals "$promptable_json"
                     python3 -c "
 import json, sys
 for u in json.loads(sys.argv[1]):
     print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
 " "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
-                        report_event "$bid" "scheduled" "$old_ver" "$new_ver"
+                        report_event "$bid" "deferred" "$old_ver" "$new_ver"
                     done
-                else
-                    show_notification "Installerer oppdateringer" "Oppdateringene installeres nå."
-                    install_updates_from_json "$promptable_json" "updated"
-                fi
-                ;;
+                    ;;
 
-            2)  # User chose "Utsett"
-                log "INFO" "User deferred updates"
-                increment_deferrals "$promptable_json"
-                python3 -c "
+                4)  # Timer expired – treat as deferral
+                    log "INFO" "Dialog timed out – treating as deferral"
+                    increment_deferrals "$promptable_json"
+                    python3 -c "
 import json, sys
 for u in json.loads(sys.argv[1]):
     print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
 " "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
-                    report_event "$bid" "deferred" "$old_ver" "$new_ver"
-                done
-                ;;
+                        report_event "$bid" "deferred" "$old_ver" "$new_ver"
+                    done
+                    ;;
+            esac
+        else
+            # Early deferrals – just show a notification (non-blocking)
+            log "INFO" "Showing notification (${min_remaining} deferrals remaining)"
+            show_update_notification "$promptable_list" "$min_remaining"
 
-            4)  # Timer expired – treat as deferral
-                log "INFO" "Dialog timed out – treating as deferral"
-                increment_deferrals "$promptable_json"
-                python3 -c "
+            # Schedule for off-hours and count as deferral
+            echo "$promptable_json" > "$PENDING_FILE"
+            increment_deferrals "$promptable_json"
+            python3 -c "
 import json, sys
 for u in json.loads(sys.argv[1]):
     print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
 " "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
-                    report_event "$bid" "deferred" "$old_ver" "$new_ver"
-                done
-                ;;
-        esac
+                report_event "$bid" "deferred" "$old_ver" "$new_ver"
+            done
+        fi
     fi
 
     log "INFO" "Update Agent finished"
