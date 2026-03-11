@@ -33,17 +33,26 @@ WORK_HOURS_END=17
 # ============================================================
 mkdir -p "${AGENT_DIR}/logs" "${AGENT_DIR}/cache"
 
+KEYCHAIN="/Library/Keychains/System.keychain"
+KEYCHAIN_SERVICE="UpdateAgentAPIKey"
+KEYCHAIN_ACCOUNT="UpdateAgent"
+
 load_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         log "ERROR" "Config file not found: ${CONFIG_FILE}"
         exit 1
     fi
     API_BASE_URL=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}'))['api_base_url'])")
-    API_KEY=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}'))['api_key'])")
     MAX_DEFERRALS=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('max_deferrals', 3))")
     DIALOG_TIMEOUT=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('dialog_timeout_seconds', 300))")
     WORK_HOURS_START=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('work_hours_start', 8))")
     WORK_HOURS_END=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('work_hours_end', 17))")
+
+    # Read API key from System Keychain (secure, encrypted)
+    API_KEY=$(security find-generic-password -a "$KEYCHAIN_ACCOUNT" -s "$KEYCHAIN_SERVICE" -w "$KEYCHAIN" 2>/dev/null) || {
+        log "ERROR" "API key not found in System Keychain. Run setup_update_agent.sh first."
+        exit 1
+    }
 }
 
 # ============================================================
