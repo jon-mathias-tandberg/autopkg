@@ -286,7 +286,11 @@ for u in updates:
 
 # ── Notifications ──
 
-NOTIFIER=$(command -v terminal-notifier 2>/dev/null || echo "")
+# Find terminal-notifier (check common paths since sudo has limited PATH)
+NOTIFIER=""
+for _p in /opt/homebrew/bin/terminal-notifier /usr/local/bin/terminal-notifier; do
+    [[ -x "$_p" ]] && NOTIFIER="$_p" && break
+done
 
 # Find app icon (.icns) for a given app name
 find_app_icon() {
