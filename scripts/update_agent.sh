@@ -284,67 +284,33 @@ for u in updates:
 # OSASCRIPT DIALOGS & NOTIFICATIONS
 # ============================================================
 
-# Notification (non-blocking, appears in top-right corner)
-show_update_notification() {
-    local app_list="$1"
-    local remaining="$2"
+# ── Notifications ──
+
+show_app_update_notification() {
+    local app_name="$1"
+    local new_version="$2"
 
     run_as_user osascript -e "
-        display notification \"${app_list}\" with title \"Oppdateringer tilgjengelig\" subtitle \"${remaining} utsettelser igjen\"
-    " 2>/dev/null || true
-
-    # Return 0 = treat as "schedule for tonight" (non-blocking default)
-    return 0
-}
-
-# Dialog with buttons (blocking, for last-chance warning before forced)
-show_update_dialog() {
-    local app_list="$1"
-    local remaining="$2"
-    local timeout="$DIALOG_TIMEOUT"
-
-    local script
-    script=$(cat << APPLESCRIPT
-set appList to "${app_list}"
-set remaining to "${remaining}"
-try
-    set result to display dialog "Følgende oppdateringer er tilgjengelig:" & return & return & appList & return & return & "Oppdateringene installeres utenfor arbeidstid." with title "Programvareoppdateringer" buttons {"Utsett (" & remaining & " igjen)", "Installer i kveld"} default button "Installer i kveld" giving up after ${timeout} with icon caution
-    if gave up of result then
-        return "timeout"
-    end if
-    return button returned of result
-on error
-    return "error"
-end try
-APPLESCRIPT
-    )
-
-    local result
-    result=$(run_as_user osascript -e "$script" 2>/dev/null) || result="error"
-
-    case "$result" in
-        *"Installer i kveld"*) return 0 ;;
-        "timeout")             return 4 ;;
-        *)                     return 2 ;;
-    esac
-}
-
-# Forced update alert (critical, no defer option)
-show_forced_dialog() {
-    local app_list="$1"
-
-    run_as_user osascript -e "
-        display alert \"Obligatorisk oppdatering\" message \"Du har utsatt følgende oppdateringer maksimalt antall ganger:\" & return & return & \"${app_list}\" & return & return & \"Oppdateringene installeres nå.\" as critical buttons {\"OK\"} default button \"OK\" giving up after 60
+        display notification \"Versjon ${new_version} installeres neste gang du lukker ${app_name}.\" with title \"Oppdatering klar\" subtitle \"${app_name}\"
     " 2>/dev/null || true
 }
 
-# Simple notification (non-blocking)
 show_notification() {
     local title="$1"
     local message="$2"
 
     run_as_user osascript -e "
         display notification \"${message}\" with title \"${title}\"
+    " 2>/dev/null || true
+}
+
+# ── Dialogs (blocking, for forced updates only) ──
+
+show_forced_dialog() {
+    local app_list="$1"
+
+    run_as_user osascript -e "
+        display alert \"Obligatorisk oppdatering\" message \"Følgende oppdateringer kan ikke utsettes lenger:\" & return & return & \"${app_list}\" & return & return & \"Lukk appene for å fullføre oppdateringen.\" as critical buttons {\"OK\"} default button \"OK\" giving up after 60
     " 2>/dev/null || true
 }
 
@@ -566,19 +532,17 @@ main() {
 
     load_config
 
-    # ── STEP 0: Install pending updates if outside work hours ──
-    if ! is_within_work_hours && [[ -f "$PENDING_FILE" ]]; then
-        log "INFO" "Outside work hours – installing pending updates"
+    # ── STEP 0: Try installing pending updates ──
+    # install_update() calls wait_for_app_to_quit(), so it only installs
+    # when the app is closed. Safe to try every run.
+    if [[ -f "$PENDING_FILE" ]]; then
+        log "INFO" "Found pending updates – attempting install"
         local pending
         pending=$(cat "$PENDING_FILE")
 
-        if user_is_logged_in; then
-            show_notification "Installerer oppdateringer" "Ventende oppdateringer installeres nå."
-        fi
-
         install_updates_from_json "$pending" "updated"
         rm -f "$PENDING_FILE"
-        log "INFO" "Pending updates installed"
+        log "INFO" "Pending updates processed"
     fi
 
     # ── STEP 1: Scan installed apps ──
@@ -633,82 +597,33 @@ main() {
         install_updates_from_json "$forced_json" "forced"
     fi
 
-    # ── STEP 6: Handle remaining updates ──
+    # ── STEP 6: Notify user and queue updates for installation ──
     if [[ "$promptable_count" -gt 0 ]]; then
-        if ! user_is_logged_in; then
-            log "INFO" "No user logged in – queuing updates for later"
-            echo "$promptable_json" > "$PENDING_FILE"
-            exit 0
-        fi
+        # Queue updates for installation (wait-for-quit handles timing)
+        echo "$promptable_json" > "$PENDING_FILE"
+        log "INFO" "Queued ${promptable_count} update(s) for installation"
 
-        local promptable_list
-        promptable_list=$(format_app_list "$promptable_json")
-
-        if [[ "$min_remaining" -le 1 ]]; then
-            # Last chance – show blocking dialog with buttons
-            log "INFO" "Last deferral remaining – showing blocking dialog"
-            show_update_dialog "$promptable_list" "$min_remaining"
-            local dialog_exit=$?
-
-            case $dialog_exit in
-                0)  # User chose "Installer i kveld"
-                    log "INFO" "User approved updates"
-                    if is_within_work_hours; then
-                        echo "$promptable_json" > "$PENDING_FILE"
-                        show_notification "Oppdateringer planlagt" "Installeres utenfor arbeidstid"
-                        python3 -c "
-import json, sys
-for u in json.loads(sys.argv[1]):
-    print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
-" "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
-                            report_event "$bid" "scheduled" "$old_ver" "$new_ver"
-                        done
-                    else
-                        show_notification "Installerer oppdateringer" "Oppdateringene installeres nå."
-                        install_updates_from_json "$promptable_json" "updated"
-                    fi
-                    ;;
-
-                2)  # User chose "Utsett"
-                    log "INFO" "User deferred updates (last chance)"
-                    increment_deferrals "$promptable_json"
-                    python3 -c "
-import json, sys
-for u in json.loads(sys.argv[1]):
-    print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
-" "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
-                        report_event "$bid" "deferred" "$old_ver" "$new_ver"
-                    done
-                    ;;
-
-                4)  # Timer expired – treat as deferral
-                    log "INFO" "Dialog timed out – treating as deferral"
-                    increment_deferrals "$promptable_json"
-                    python3 -c "
-import json, sys
-for u in json.loads(sys.argv[1]):
-    print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
-" "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
-                        report_event "$bid" "deferred" "$old_ver" "$new_ver"
-                    done
-                    ;;
-            esac
-        else
-            # Early deferrals – just show a notification (non-blocking)
-            log "INFO" "Showing notification (${min_remaining} deferrals remaining)"
-            show_update_notification "$promptable_list" "$min_remaining"
-
-            # Schedule for off-hours and count as deferral
-            echo "$promptable_json" > "$PENDING_FILE"
-            increment_deferrals "$promptable_json"
+        # Show per-app notification if user is logged in
+        if user_is_logged_in; then
             python3 -c "
 import json, sys
 for u in json.loads(sys.argv[1]):
-    print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
-" "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
-                report_event "$bid" "deferred" "$old_ver" "$new_ver"
+    print(u.get('app_name', u['bundle_id']), u.get('latest_version', '?'), sep='|||')
+" "$promptable_json" | while IFS='|||' read -r app_name new_ver; do
+                show_app_update_notification "$app_name" "$new_ver"
+                sleep 1  # Small delay between notifications
             done
         fi
+
+        # Increment deferral counter
+        increment_deferrals "$promptable_json"
+        python3 -c "
+import json, sys
+for u in json.loads(sys.argv[1]):
+    print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
+" "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
+            report_event "$bid" "scheduled" "$old_ver" "$new_ver"
+        done
     fi
 
     log "INFO" "Update Agent finished"
