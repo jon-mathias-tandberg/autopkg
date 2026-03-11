@@ -322,6 +322,8 @@ show_app_update_notification() {
             -group "com.company.updateagent.${bundle_id:-$app_name}"
             -ignoreDnD
         )
+        # -sender uses the app's own icon in both banner and Notification Centre
+        [[ -n "$bundle_id" ]] && notifier_args+=(-sender "$bundle_id")
         [[ -n "$icon" ]] && notifier_args+=(-appIcon "$icon")
         run_as_user "$NOTIFIER" "${notifier_args[@]}" 2>/dev/null || true
     else
