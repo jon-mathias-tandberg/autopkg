@@ -487,8 +487,9 @@ install_update() {
     log "INFO" "Downloading ${bundle_id}: ${download_filename}"
     local temp_file="${AGENT_DIR}/cache/${download_filename}"
 
-    if ! curl -sfL -o "$temp_file" "$download_url" 2>> "$LOG_FILE"; then
-        log "ERROR" "Download failed for ${bundle_id}"
+    log "INFO" "Download URL: ${download_url:0:80}..."
+    if ! curl -sfL -o "$temp_file" --create-dirs "$download_url" 2>> "$LOG_FILE"; then
+        log "ERROR" "Download failed for ${bundle_id} (curl exit: $?)"
         rm -f "$temp_file"
         return 1
     fi
