@@ -554,8 +554,8 @@ install_updates_from_json() {
 import json, sys
 updates = json.loads(sys.argv[1])
 for u in updates:
-    print(u['bundle_id'], u.get('download_url',''), u.get('download_filename',''), u.get('installed_version',''), u.get('latest_version',''), sep='|||')
-" "$updates_json" | while IFS='|||' read -r bid dl_url dl_file old_ver new_ver; do
+    print(u['bundle_id'] + '\t' + u.get('download_url','') + '\t' + u.get('download_filename','') + '\t' + u.get('installed_version','') + '\t' + u.get('latest_version',''))
+" "$updates_json" | while IFS=$'\t' read -r bid dl_url dl_file old_ver new_ver; do
         if install_update "$bid" "$dl_url" "$dl_file"; then
             report_event "$bid" "$action" "$old_ver" "$new_ver"
         else
@@ -675,8 +675,8 @@ print(json.dumps([u for u in available if u['bundle_id'] not in installed]))
             python3 -c "
 import json, sys
 for u in json.loads(sys.argv[1]):
-    print(u.get('app_name', u['bundle_id']), u.get('latest_version', '?'), u['bundle_id'], sep='|||')
-" "$promptable_json" | while IFS='|||' read -r app_name new_ver bid; do
+    print(u.get('app_name', u['bundle_id']) + '\t' + u.get('latest_version', '?') + '\t' + u['bundle_id'])
+" "$promptable_json" | while IFS=$'\t' read -r app_name new_ver bid; do
                 show_app_update_notification "$app_name" "$new_ver" "$bid"
                 sleep 1
             done
@@ -687,8 +687,8 @@ for u in json.loads(sys.argv[1]):
         python3 -c "
 import json, sys
 for u in json.loads(sys.argv[1]):
-    print(u['bundle_id'], u.get('installed_version',''), u.get('latest_version',''), sep='|||')
-" "$promptable_json" | while IFS='|||' read -r bid old_ver new_ver; do
+    print(u['bundle_id'] + '\t' + u.get('installed_version','') + '\t' + u.get('latest_version',''))
+" "$promptable_json" | while IFS=$'\t' read -r bid old_ver new_ver; do
             report_event "$bid" "scheduled" "$old_ver" "$new_ver"
         done
     fi
