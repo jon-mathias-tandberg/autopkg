@@ -320,13 +320,11 @@ show_app_update_notification() {
         local current_user uid
         current_user=$(get_current_user)
         uid=$(get_current_user_uid)
-        # Run terminal-notifier as the logged-in user with full path
-        launchctl asuser "$uid" sudo -u "$current_user" "$NOTIFIER" \
-            -title "Oppdatering klar" \
-            -subtitle "$app_name" \
-            -message "$message" \
-            -sound default \
-            ${bundle_id:+-sender "$bundle_id"} 2>/dev/null || true
+        log "INFO" "Sending notification: ${app_name} v${new_version} (user: ${current_user}, notifier: ${NOTIFIER})"
+        # Build args array to handle spaces correctly
+        local nargs=(-title "Oppdatering klar" -subtitle "$app_name" -message "$message" -sound default)
+        [[ -n "$bundle_id" ]] && nargs+=(-sender "$bundle_id")
+        launchctl asuser "$uid" sudo -u "$current_user" "$NOTIFIER" "${nargs[@]}" 2>>"$LOG_FILE" || log "WARN" "terminal-notifier failed"
     else
         run_as_user osascript -e "
             display notification \"${message}\" with title \"Oppdatering klar\" subtitle \"${app_name}\"
