@@ -96,9 +96,9 @@ user_is_logged_in() {
 # ============================================================
 is_within_work_hours() {
     local hour dow
-    hour=$(date +%H)
-    dow=$(date +%u)  # 1=mon 7=sun
-    [[ "$dow" -le 5 && "$hour" -ge "$WORK_HOURS_START" && "$hour" -lt "$WORK_HOURS_END" ]]
+    hour=$((10#$(date +%H)))
+    dow=$((10#$(date +%u)))  # 1=mon 7=sun
+    [[ $dow -le 5 && $hour -ge $WORK_HOURS_START && $hour -lt $WORK_HOURS_END ]]
 }
 
 # ============================================================
