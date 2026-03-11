@@ -322,9 +322,10 @@ show_app_update_notification() {
         uid=$(get_current_user_uid)
         log "INFO" "Sending notification: ${app_name} v${new_version} (user: ${current_user}, notifier: ${NOTIFIER})"
         # Build args array to handle spaces correctly
-        local nargs=(-title "Oppdatering klar" -subtitle "$app_name" -message "$message" -sound default)
+        local nargs=(-title "Oppdatering klar" -subtitle "$app_name" -message "$message" -sound default -timeout 10)
         [[ -n "$bundle_id" ]] && nargs+=(-sender "$bundle_id")
-        launchctl asuser "$uid" sudo -u "$current_user" "$NOTIFIER" "${nargs[@]}" 2>>"$LOG_FILE" || log "WARN" "terminal-notifier failed"
+        # Run in background so script doesn't block waiting for user click
+        launchctl asuser "$uid" sudo -u "$current_user" "$NOTIFIER" "${nargs[@]}" >>/dev/null 2>>"$LOG_FILE" &
     else
         run_as_user osascript -e "
             display notification \"${message}\" with title \"Oppdatering klar\" subtitle \"${app_name}\"
