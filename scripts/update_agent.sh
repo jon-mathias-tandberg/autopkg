@@ -316,19 +316,14 @@ show_app_update_notification() {
 
     local message="Versjon ${new_version} installeres neste gang du lukker ${app_name}."
 
-    if [[ -x "$NOTIFIER" ]]; then
-        local icon
-        icon=$(find_app_icon "$app_name")
+    if [[ -n "$NOTIFIER" ]]; then
         local notifier_args=(
             -title "Oppdatering klar"
             -subtitle "$app_name"
             -message "$message"
-            -group "com.company.updateagent.${bundle_id:-$app_name}"
-            -ignoreDnD
+            -sound default
         )
-        # -sender uses the app's own icon in both banner and Notification Centre
         [[ -n "$bundle_id" ]] && notifier_args+=(-sender "$bundle_id")
-        [[ -n "$icon" ]] && notifier_args+=(-appIcon "$icon")
         run_as_user "$NOTIFIER" "${notifier_args[@]}" 2>/dev/null || true
     else
         run_as_user osascript -e "
@@ -341,12 +336,10 @@ show_notification() {
     local title="$1"
     local message="$2"
 
-    if [[ -x "$NOTIFIER" ]]; then
+    if [[ -n "$NOTIFIER" ]]; then
         run_as_user "$NOTIFIER" \
             -title "$title" \
-            -message "$message" \
-            -group "com.company.updateagent.general" \
-            -ignoreDnD 2>/dev/null || true
+            -message "$message" 2>/dev/null || true
     else
         run_as_user osascript -e "
             display notification \"${message}\" with title \"${title}\"
