@@ -286,22 +286,66 @@ for u in updates:
 
 # ── Notifications ──
 
+NOTIFIER="/usr/local/bin/terminal-notifier"
+
+# Find app icon (.icns) for a given app name
+find_app_icon() {
+    local app_name="$1"
+    local icon=""
+    for app_path in "/Applications/${app_name}.app" "/Applications/Utilities/${app_name}.app"; do
+        if [[ -d "$app_path" ]]; then
+            icon=$(defaults read "${app_path}/Contents/Info" CFBundleIconFile 2>/dev/null) || icon=""
+            if [[ -n "$icon" ]]; then
+                [[ "$icon" != *.icns ]] && icon="${icon}.icns"
+                icon="${app_path}/Contents/Resources/${icon}"
+                [[ -f "$icon" ]] && echo "$icon" && return
+            fi
+        fi
+    done
+    echo ""
+}
+
 show_app_update_notification() {
     local app_name="$1"
     local new_version="$2"
+    local bundle_id="${3:-}"
 
-    run_as_user osascript -e "
-        display notification \"Versjon ${new_version} installeres neste gang du lukker ${app_name}.\" with title \"Oppdatering klar\" subtitle \"${app_name}\"
-    " 2>/dev/null || true
+    local message="Versjon ${new_version} installeres neste gang du lukker ${app_name}."
+
+    if [[ -x "$NOTIFIER" ]]; then
+        local icon
+        icon=$(find_app_icon "$app_name")
+        local notifier_args=(
+            -title "Oppdatering klar"
+            -subtitle "$app_name"
+            -message "$message"
+            -group "com.company.updateagent.${bundle_id:-$app_name}"
+            -ignoreDnD
+        )
+        [[ -n "$icon" ]] && notifier_args+=(-appIcon "$icon")
+        run_as_user "$NOTIFIER" "${notifier_args[@]}" 2>/dev/null || true
+    else
+        run_as_user osascript -e "
+            display notification \"${message}\" with title \"Oppdatering klar\" subtitle \"${app_name}\"
+        " 2>/dev/null || true
+    fi
 }
 
 show_notification() {
     local title="$1"
     local message="$2"
 
-    run_as_user osascript -e "
-        display notification \"${message}\" with title \"${title}\"
-    " 2>/dev/null || true
+    if [[ -x "$NOTIFIER" ]]; then
+        run_as_user "$NOTIFIER" \
+            -title "$title" \
+            -message "$message" \
+            -group "com.company.updateagent.general" \
+            -ignoreDnD 2>/dev/null || true
+    else
+        run_as_user osascript -e "
+            display notification \"${message}\" with title \"${title}\"
+        " 2>/dev/null || true
+    fi
 }
 
 # ── Dialogs (blocking, for forced updates only) ──
@@ -608,10 +652,10 @@ main() {
             python3 -c "
 import json, sys
 for u in json.loads(sys.argv[1]):
-    print(u.get('app_name', u['bundle_id']), u.get('latest_version', '?'), sep='|||')
-" "$promptable_json" | while IFS='|||' read -r app_name new_ver; do
-                show_app_update_notification "$app_name" "$new_ver"
-                sleep 1  # Small delay between notifications
+    print(u.get('app_name', u['bundle_id']), u.get('latest_version', '?'), u['bundle_id'], sep='|||')
+" "$promptable_json" | while IFS='|||' read -r app_name new_ver bid; do
+                show_app_update_notification "$app_name" "$new_ver" "$bid"
+                sleep 1
             done
         fi
 
