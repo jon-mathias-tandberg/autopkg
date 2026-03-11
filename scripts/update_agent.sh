@@ -309,28 +309,42 @@ find_app_icon() {
     echo ""
 }
 
-show_app_update_notification() {
-    local app_name="$1"
-    local new_version="$2"
-    local bundle_id="${3:-}"
-
-    local message="Versjon ${new_version} installeres neste gang du lukker ${app_name}."
+send_notification() {
+    local title="$1"
+    local subtitle="$2"
+    local message="$3"
+    local bundle_id="${4:-}"
 
     if [[ -n "$NOTIFIER" ]]; then
         local current_user uid
         current_user=$(get_current_user)
         uid=$(get_current_user_uid)
-        log "INFO" "Sending notification: ${app_name} v${new_version} (user: ${current_user}, notifier: ${NOTIFIER})"
-        # Build args array to handle spaces correctly
-        local nargs=(-title "Oppdatering klar" -subtitle "$app_name" -message "$message" -sound default -timeout 10)
+        local nargs=(-title "$title" -subtitle "$subtitle" -message "$message" -sound default -timeout 10)
         [[ -n "$bundle_id" ]] && nargs+=(-sender "$bundle_id")
-        # Run in background so script doesn't block waiting for user click
         launchctl asuser "$uid" sudo -u "$current_user" "$NOTIFIER" "${nargs[@]}" >>/dev/null 2>>"$LOG_FILE" &
     else
         run_as_user osascript -e "
-            display notification \"${message}\" with title \"Oppdatering klar\" subtitle \"${app_name}\"
+            display notification \"${message}\" with title \"${title}\" subtitle \"${subtitle}\"
         " 2>/dev/null || true
     fi
+}
+
+show_app_pending_notification() {
+    local app_name="$1"
+    local new_version="$2"
+    local bundle_id="${3:-}"
+    log "INFO" "Notification: ${app_name} v${new_version} – pending (app running)"
+    send_notification "Oppdatering klar" "$app_name" \
+        "Versjon ${new_version} installeres neste gang du lukker ${app_name}." "$bundle_id"
+}
+
+show_app_updated_notification() {
+    local app_name="$1"
+    local new_version="$2"
+    local bundle_id="${3:-}"
+    log "INFO" "Notification: ${app_name} v${new_version} – updated"
+    send_notification "Oppdatert" "$app_name" \
+        "${app_name} er oppdatert til versjon ${new_version}." "$bundle_id"
 }
 
 show_notification() {
@@ -666,33 +680,51 @@ print(json.dumps([u for u in available if u['bundle_id'] not in installed]))
         install_updates_from_json "$forced_json" "forced"
     fi
 
-    # ── STEP 6: Notify user and queue updates for installation ──
+    # ── STEP 6: Per-app handling – install if closed, notify if running ──
     if [[ "$promptable_count" -gt 0 ]]; then
-        # Queue updates for installation (wait-for-quit handles timing)
-        echo "$promptable_json" > "$PENDING_FILE"
-        log "INFO" "Queued ${promptable_count} update(s) for installation"
+        local pending_apps="[]"
 
-        # Show per-app notification if user is logged in
-        if user_is_logged_in; then
-            python3 -c "
-import json, sys
-for u in json.loads(sys.argv[1]):
-    print(u.get('app_name', u['bundle_id']) + '\t' + u.get('latest_version', '?') + '\t' + u['bundle_id'])
-" "$promptable_json" | while IFS=$'\t' read -r app_name new_ver bid; do
-                show_app_update_notification "$app_name" "$new_ver" "$bid"
-                sleep 1
-            done
-        fi
-
-        # Increment deferral counter
-        increment_deferrals "$promptable_json"
         python3 -c "
 import json, sys
 for u in json.loads(sys.argv[1]):
-    print(u['bundle_id'] + '\t' + u.get('installed_version','') + '\t' + u.get('latest_version',''))
-" "$promptable_json" | while IFS=$'\t' read -r bid old_ver new_ver; do
-            report_event "$bid" "scheduled" "$old_ver" "$new_ver"
+    print(u.get('app_name', u['bundle_id']) + '\t' + u.get('latest_version', '?') + '\t' + u['bundle_id'] + '\t' + u.get('download_url','') + '\t' + u.get('download_filename','') + '\t' + u.get('installed_version',''))
+" "$promptable_json" | while IFS=$'\t' read -r app_name new_ver bid dl_url dl_file old_ver; do
+
+            if app_is_running "$bid"; then
+                # App is open – notify user and queue for later
+                log "INFO" "${app_name} is running – queuing update"
+                if user_is_logged_in; then
+                    show_app_pending_notification "$app_name" "$new_ver" "$bid"
+                fi
+                # Add to pending file
+                python3 -c "
+import json, sys, os
+path = '${PENDING_FILE}'
+pending = []
+if os.path.isfile(path):
+    with open(path) as f:
+        pending = json.load(f)
+pending.append({'bundle_id':'${bid}','app_name':'${app_name}','latest_version':'${new_ver}','download_url':'${dl_url}','download_filename':'${dl_file}','installed_version':'${old_ver}'})
+with open(path, 'w') as f:
+    json.dump(pending, f)
+"
+                report_event "$bid" "scheduled" "$old_ver" "$new_ver"
+            else
+                # App is closed – install now, then notify
+                log "INFO" "${app_name} is not running – installing now"
+                if install_update "$bid" "$dl_url" "$dl_file"; then
+                    if user_is_logged_in; then
+                        show_app_updated_notification "$app_name" "$new_ver" "$bid"
+                    fi
+                    report_event "$bid" "updated" "$old_ver" "$new_ver"
+                else
+                    log "ERROR" "Failed to install ${bid}"
+                fi
+            fi
+            sleep 1
         done
+
+        increment_deferrals "$promptable_json"
     fi
 
     log "INFO" "Update Agent finished"
