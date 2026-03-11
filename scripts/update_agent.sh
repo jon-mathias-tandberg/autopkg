@@ -286,7 +286,7 @@ for u in updates:
 
 # ── Notifications ──
 
-NOTIFIER="/usr/local/bin/terminal-notifier"
+NOTIFIER=$(command -v terminal-notifier 2>/dev/null || echo "")
 
 # Find app icon (.icns) for a given app name
 find_app_icon() {
