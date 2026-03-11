@@ -317,14 +317,16 @@ show_app_update_notification() {
     local message="Versjon ${new_version} installeres neste gang du lukker ${app_name}."
 
     if [[ -n "$NOTIFIER" ]]; then
-        local notifier_args=(
-            -title "Oppdatering klar"
-            -subtitle "$app_name"
-            -message "$message"
-            -sound default
-        )
-        [[ -n "$bundle_id" ]] && notifier_args+=(-sender "$bundle_id")
-        run_as_user "$NOTIFIER" "${notifier_args[@]}" 2>/dev/null || true
+        local current_user uid
+        current_user=$(get_current_user)
+        uid=$(get_current_user_uid)
+        # Run terminal-notifier as the logged-in user with full path
+        launchctl asuser "$uid" sudo -u "$current_user" "$NOTIFIER" \
+            -title "Oppdatering klar" \
+            -subtitle "$app_name" \
+            -message "$message" \
+            -sound default \
+            ${bundle_id:+-sender "$bundle_id"} 2>/dev/null || true
     else
         run_as_user osascript -e "
             display notification \"${message}\" with title \"Oppdatering klar\" subtitle \"${app_name}\"
