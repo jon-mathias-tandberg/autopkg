@@ -3,6 +3,7 @@
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 
@@ -75,8 +76,9 @@ def generate_download_url(blob_path: str) -> tuple[str, str]:
         logging.error("SAS token generation failed: %s", exc)
         return "", ""
 
+    encoded_path = quote(blob_path, safe="/")
     url = (
         f"https://{account_name}.blob.core.windows.net"
-        f"/{container}/{blob_path}?{token}"
+        f"/{container}/{encoded_path}?{token}"
     )
     return url, expiry.isoformat()
