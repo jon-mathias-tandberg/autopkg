@@ -575,25 +575,12 @@ main() {
 
     load_config
 
-    # ── STEP 0: Try installing pending updates ──
-    # install_update() calls wait_for_app_to_quit(), so it only installs
-    # when the app is closed. Safe to try every run.
-    if [[ -f "$PENDING_FILE" ]]; then
-        log "INFO" "Found pending updates – attempting install"
-        local pending
-        pending=$(cat "$PENDING_FILE")
-
-        install_updates_from_json "$pending" "updated"
-        rm -f "$PENDING_FILE"
-        log "INFO" "Pending updates processed"
-    fi
-
     # ── STEP 1: Scan installed apps ──
     log "INFO" "Scanning installed apps..."
     local installed_apps
     installed_apps=$(scan_applications)
 
-    # ── STEP 2: Check API for updates ──
+    # ── STEP 2: Check API for updates (always get fresh SAS URLs) ──
     log "INFO" "Checking for updates..."
     local api_response
     if ! api_response=$(check_updates "$installed_apps"); then
@@ -604,6 +591,43 @@ main() {
     # ── STEP 3: Extract available updates ──
     local updates_available
     updates_available=$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1]).get('updates_available',[])))" "$api_response")
+
+    # ── STEP 3b: Try installing pending updates with fresh SAS URLs ──
+    if [[ -f "$PENDING_FILE" ]]; then
+        log "INFO" "Found pending updates – refreshing SAS URLs and attempting install"
+
+        # Match pending bundle IDs against fresh API response
+        local refreshed
+        refreshed=$(python3 -c "
+import json, sys
+pending = json.loads(sys.argv[1])
+fresh = json.loads(sys.argv[2])
+fresh_map = {u['bundle_id']: u for u in fresh}
+result = []
+for p in pending:
+    bid = p['bundle_id']
+    if bid in fresh_map:
+        result.append(fresh_map[bid])
+print(json.dumps(result))
+" "$(cat "$PENDING_FILE")" "$updates_available")
+
+        local refreshed_count
+        refreshed_count=$(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$refreshed")
+
+        if [[ "$refreshed_count" -gt 0 ]]; then
+            install_updates_from_json "$refreshed" "updated"
+        fi
+        rm -f "$PENDING_FILE"
+        log "INFO" "Pending updates processed"
+
+        # Remove installed apps from updates_available
+        updates_available=$(python3 -c "
+import json, sys
+available = json.loads(sys.argv[1])
+installed = {u['bundle_id'] for u in json.loads(sys.argv[2])}
+print(json.dumps([u for u in available if u['bundle_id'] not in installed]))
+" "$updates_available" "$refreshed")
+    fi
 
     local update_count
     update_count=$(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$updates_available")
